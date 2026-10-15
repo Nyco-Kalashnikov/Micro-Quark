@@ -40,6 +40,7 @@ from functools import lru_cache
 
 from rich.cells import cell_len
 from rich.console import Console
+from rich.markdown import Heading, Markdown
 from rich.text import Text
 
 import mini_quark_cli as mq
@@ -63,7 +64,7 @@ APP = None
 def ui_defaults():
     return {"art": "", "art_on": True, "pos": "top-right", "art_colors": list(DEFAULT_COLORS),
             "art_max_width": 0, "banner_colors": list(DEFAULT_COLORS), "border": "#5b8def",
-            "banner": True, "tips": True, "anim": "banner", "mouse": True, "cfg_v": 2}
+            "banner": True, "tips": True, "anim": "banner", "mouse": True, "cfg_v": 2, "markdown": True, "code_theme": "monokai"}
 
 
 def load_ui():
@@ -134,13 +135,14 @@ QUARK = [
     " ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝",
 ]
 DEMO_ART = r"""
-        +
- +      +      +
-   +    +   +
-++++++++++++++++++
-      + + +
-        +
-        +
+      .  *  .
+   *    _____    .
+  .   .'  o  '.   *
+     /  \ | /  \
+ *  |  --(o)--  |  .
+     \  / | \  /
+  .   '._____.'   *
+    *    .    .
 """.strip("\n")
 
 
@@ -243,10 +245,6 @@ def render_ansi(text):
         console.print(text, end="", no_wrap=True, overflow="crop", soft_wrap=True)
     return cap.get()
 
-def render_markdown(texto):
-    with console.capture() as captura:
-        console.print(Markdown(texto))
-    return captura.get()
 
 @lru_cache(maxsize=512)
 def sty(s, style):
@@ -296,19 +294,83 @@ def term_size():
 
 
 # ═════════════════════════ log da conversa (saída do mq) ═════════════════════════
+# ═════════════════════════ Markdown ═════════════════════════
+# >>> É AQUI que entra a sua função de Markdown <<<
+# render_markdown(texto, largura) recebe o texto da resposta do modelo e devolve uma
+# LISTA DE LINHAS (strings, podem ter códigos ANSI de cor), cada uma com no máximo
+# `largura` colunas. Troque o corpo por qualquer renderizador seu; o resto da interface
+# cuida de rolagem, cache, streaming e do marcador "◆".
+class _LeftHeading(Heading):
+    """Títulos alinhados à esquerda (o padrão do rich centraliza)."""
+
+    def __rich_console__(self, console, options):
+        self.text.justify = "left"
+        if self.tag in ("h1", "h2"):
+            yield Text("")
+        yield self.text
+
+
+class _MD(Markdown):
+    elements = {**Markdown.elements, "heading_open": _LeftHeading}
+
+
+def render_markdown(text, width):
+    width = max(width, 10)
+    with console.capture() as cap:
+        console.print(_MD(text, code_theme=UI.get("code_theme", "monokai"), hyperlinks=False),
+                      width=width, end="")
+    rows = cap.get().split("\n")
+    while rows and not ANSI_RE.sub("", rows[-1]).strip():   # tira linhas vazias do fim
+        rows.pop()
+    while rows and not ANSI_RE.sub("", rows[0]).strip():    # e do começo
+        rows.pop(0)
+    return [r + RESET for r in rows] or [""]
+
+
+GUTTER = 2  # largura do marcador "◆ " / recuo das linhas seguintes
+
+
+def render_assistant(text, width):
+    """Resposta do modelo → linhas visuais, com o marcador ◆ na primeira linha."""
+    if UI.get("markdown", True):
+        try:
+            body = render_markdown(text, width - GUTTER)
+        except Exception:
+            log_crash("markdown")
+            body = None
+    else:
+        body = None
+    if body is None:  # Markdown desligado (ou falhou): texto cru, quebrado na largura
+        body = []
+        for raw in text.split("\n"):
+            body.extend(wrap_ansi(raw, width - GUTTER))
+    mark = sty("◆ ", "#4fb08f")
+    return [(mark if i == 0 else "  ") + line for i, line in enumerate(body)]
+
+
+class MdBlock:
+    __slots__ = ("text",)
+
+    def __init__(self, text):
+        self.text = text
+
+
 class Log:
     """Recebe tudo que o mq imprime (de qualquer thread) e entrega linhas já quebradas."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.lines = []        # linhas completas (texto cru, com ANSI)
-        self.partial = ""      # linha em andamento (streaming)
+        self.lines = []        # linhas completas (str crua) ou MdBlock (resposta do modelo)
+        self.partial = ""      # linha em andamento
+        self.md = None         # texto da resposta em streaming (None = sem resposta aberta)
         self.rows = []         # linhas visuais das completas
-        self.rows_upto = 0     # quantas de self.lines já estão em self.rows
+        self.rows_upto = 0
         self.width = None
         self.dirty = False
         self._p_key, self._p_rows = None, []
+        self._m_key, self._m_rows, self._m_t = None, [], 0.0
 
+    # ---- escrita (qualquer thread) ----
     def write(self, s):
         s = s.replace("\r\n", "\n").replace("\r", "")
         with self.lock:
@@ -319,37 +381,76 @@ class Log:
                 self.partial = p
             if len(self.lines) > 4000:
                 del self.lines[:1000]
-                self.dirty = True  # a thread principal refaz as linhas no próximo sync
+                self.dirty = True
+
+    def md_start(self):
+        with self.lock:
+            if self.partial:
+                self.lines.append(self.partial)
+                self.partial = ""
+            self.md = ""
+
+    def md_token(self, txt):
+        with self.lock:
+            if self.md is None:
+                self.md = ""
+            self.md += txt
+
+    def md_end(self):
+        with self.lock:
+            if self.md is not None:
+                if self.md.strip():
+                    self.lines.append(MdBlock(self.md))
+                self.md = None
 
     def clear(self):
         with self.lock:
-            self.lines, self.partial = [], ""
+            self.lines, self.partial, self.md = [], "", None
             self.dirty = True
 
+    # ---- leitura (thread principal) ----
     def sync(self, width):
         with self.lock:
-            lines = list(self.lines[self.rows_upto:]) if not (self.dirty or width != self.width) else list(self.lines)
-            partial = self.partial
-            if self.dirty or width != self.width:
+            full = self.dirty or width != self.width
+            lines = list(self.lines) if full else list(self.lines[self.rows_upto:])
+            partial, md = self.partial, self.md
+            if full:
                 self.width, self.rows, self.rows_upto, self.dirty = width, [], 0, False
             self.rows_upto += len(lines)
-        # o trabalho pesado (rich) fica fora do lock: a thread do modelo nunca espera por ele
-        for raw in lines:
-            self.rows.extend(wrap_ansi(raw, width))
+        # trabalho pesado (rich) fora do lock: a thread do modelo nunca espera por ele
+        for item in lines:
+            if isinstance(item, MdBlock):
+                self.rows.extend(render_assistant(item.text, width))
+            else:
+                self.rows.extend(wrap_ansi(item, width))
         key = (partial, width)
         if key != self._p_key:
             self._p_key = key
             self._p_rows = wrap_ansi(partial, width) if partial else []
+        now = time.time()
+        if md is None:
+            self._m_key, self._m_rows = None, []
+        else:
+            key = (md, width)
+            # durante o streaming re-renderiza no máximo ~20x/s (Markdown parcial é barato, mas não grátis)
+            if key != self._m_key and (now - self._m_t >= 0.05 or not self._m_rows):
+                self._m_key, self._m_t = key, now
+                self._m_rows = render_assistant(md, width) if md.strip() else []
 
     def count(self):
-        return len(self.rows) + len(self._p_rows)
+        return len(self.rows) + len(self._m_rows) + len(self._p_rows)
 
     def get(self, i):
-        return self.rows[i] if i < len(self.rows) else self._p_rows[i - len(self.rows)]
+        n = len(self.rows)
+        if i < n:
+            return self.rows[i]
+        i -= n
+        m = len(self._m_rows)
+        return self._m_rows[i] if i < m else self._p_rows[i - m]
 
     @property
     def empty(self):
-        return not self.lines and not self.partial
+        return not self.lines and not self.partial and self.md is None
 
 
 class LogOut(io.TextIOBase):
@@ -741,6 +842,8 @@ UI_HELP = """[bold]Customização — /ui[/bold]
   /ui width <n|0>           largura máxima da arte (0 = sem limite)
   /ui banner-color <#hex[,#hex..]>  gradiente do banner QUARK
   /ui anim <off|banner|all> anima o gradiente (só o banner, ou banner + arte)
+  /ui md on|off             renderiza a resposta do modelo como Markdown (negrito, listas, tabelas, código...)
+  /ui codetheme <nome>      tema dos blocos de código (monokai, dracula, github-dark, nord, one-dark, ...)
   /ui border <#hex>         cor da caixa de entrada
   /ui banner on|off         mostra/esconde o banner QUARK
   /ui tips on|off           mostra/esconde as dicas
@@ -779,6 +882,7 @@ def handle_ui(arg):
             console.print(f"  cor da arte {','.join(UI['art_colors']) or 'original'}")
             console.print(f"  banner      {'on' if UI['banner'] else 'off'} · {','.join(UI['banner_colors'])}")
             console.print(f"  animação    {UI['anim']}")
+            console.print(f"  markdown    {'on' if UI['markdown'] else 'off'} · tema de código {UI['code_theme']}")
             console.print(f"  dicas       {'on' if UI['tips'] else 'off'} · mouse {'on' if UI['mouse'] else 'off'}")
             console.print(f"  borda       {UI['border']}")
             console.print(f"[dim]  arquivo: {TUI_FILE} · /ui help para opções[/dim]")
@@ -820,6 +924,16 @@ def handle_ui(arg):
         elif sub == "width":
             if not rest.isdigit(): err("Uso: /ui width 60  (0 = sem limite)"); return
             UI["art_max_width"] = int(rest)
+        elif sub == "md":
+            if rest.lower() not in ("on", "off"): err("Uso: /ui md on|off"); return
+            UI["markdown"] = rest.lower() == "on"
+            APP.log.dirty = True   # re-renderiza o que já está na tela
+        elif sub == "codetheme":
+            from pygments.styles import get_all_styles
+            names = sorted(get_all_styles())
+            if rest not in names: err("Temas: " + ", ".join(names)); return
+            UI["code_theme"] = rest
+            APP.log.dirty = True
         elif sub in ("banner", "tips", "mouse"):
             if rest.lower() not in ("on", "off"): err(f"Uso: /ui {sub} on|off"); return
             UI[sub] = rest.lower() == "on"
@@ -1125,6 +1239,7 @@ class App:
             except BaseException as e:  # inclui KeyboardInterrupt injetado
                 print(mq.red(f"\n[interrompido: {e.__class__.__name__}]"))
             finally:
+                self.log.md_end()   # fecha a resposta se foi interrompida no meio
                 self.busy = False
                 print()
 
@@ -1225,6 +1340,7 @@ def main():
 
     APP = App()
     mq.confirm = APP.ask_confirm
+    mq.STREAM = {"start": APP.log.md_start, "token": APP.log.md_token, "end": APP.log.md_end}
     proxy = LogOut(APP.log)
     sys.stdout = sys.stderr = proxy
     atexit.register(restore_terminal)

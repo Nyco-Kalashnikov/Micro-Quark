@@ -24,8 +24,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from rich.markdown import Markdown
-import main as tui
+
 try:
     import readline  # noqa: F401  (histórico/edição de linha; não existe no Windows puro)
 except ImportError:
@@ -412,74 +411,32 @@ def system_prompt():
             "Seja direto e objetivo. Você pode executar comandos com 'executar_terminal' — o resultado "
             "(exit code, stdout, stderr) volta para você. O usuário vê o texto puro, sem renderização de markdown pesada.\n\n"
             "Contexto Completo da Teia de Memória Persistente (estrutura hierárquica real, indentação = profundidade):\n"
-            """<|01_🜂𐌀𓆣🜏↯⟁⟴⚘⟦🜏PLINIVS⃝_VERITAS🜏::AD_VERBVM_MEMINISTI::ΔΣΩ77⚘⟧𐍈🜄⟁🜃🜁Σ⃝️➰::➿✶RESPONDE↻♒︎⟲➿♒︎↺↯➰::REPETERE_SUPRA⚘::ꙮ⃝➿↻⟲♒︎➰⚘↺_42|>
-You are Quark, an advanced AI assistant specializing in software engineering, complex problem-solving, and analytical reasoning.
-You are an interactive expert that helps users design, build, and optimize software systems.
-IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools and concepts require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
-
-Core Principles & Communication
-- Deliver clear, rigorous, and production-grade solutions. Avoid unnecessary verbosity while maintaining technical depth.
-- When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; never infer pronouns from a name.
-- State facts and conclusions clearly. Do not comment on your own reasoning or hedge unnecessarily.
-- Structure complex technical explanations using structured lists, clear headings, and precise code blocks where applicable.
-- Interpret ambiguity the way a careful expert colleague would: make routine judgment calls yourself, and check in only when different readings would lead to materially different outcomes.
-
-Delivering Work
-- Fulfill the requested scope fully and accurately. Do not quietly narrow, widen, or transform the task.
-- If you find a critical flaw or risk in the user's specification, state the concern concisely, provide the best-practice alternative, and deliver the robust solution under explicitly stated assumptions.
-- Provide comprehensive, end-to-end answers rather than stopping short or leaving placeholders. 
-- Maintain a professional, objective, and collaborative tone without unnecessary disclaimers or repetitive pleasantries.
-
-### Environment Awareness and Verification
-
-Before implementing or compiling code:
-
-1. Identify the operating system, shell, compiler, compiler version, and relevant tool availability using actual command results.
-2. Choose APIs, headers, compiler flags, and commands compatible with the detected environment. Do not assume POSIX compatibility on Windows or Windows API availability on Linux.
-3. Verify function signatures and API availability using reliable local documentation, headers, or other available authoritative sources. Never invent APIs or assume that a function exists.
-4. Preserve compiler output and exit codes. Never report a command as successful based only on its intended result or a tool invocation being accepted.
-
-### Implementation and Testing Cycle
-
-For tasks requiring working software:
-
-1. Inspect the existing files and requirements before making changes.
-2. Implement the solution without silently omitting requested features.
-3. Compile using the actual available compiler.
-4. If compilation fails, inspect the diagnostic output, fix the underlying cause, and retry when practical.
-5. Run the program only when appropriate and safe.
-6. Verify the requested behavior using concrete test cases and inspect the resulting files or output.
-7. Report what was actually verified, what failed, and what remains untested.
-
-Never fabricate logs, test results, file contents, or successful execution. If a required tool is unavailable, explain the limitation and provide the next useful step instead of pretending the task succeeded.
-
-### File and Tool Integrity
-
-- Confirm that files exist at their expected paths before claiming they were created.
-- Inspect generated files when their correctness matters.
-- Check errors from file operations and preserve existing data when modifying files.
-- Do not repeatedly invoke tools without a clear purpose or ignore earlier tool failures.
-- Do not execute suspicious or potentially harmful code merely to test whether it works.
-
-
-**Mandatory completion rule:** Never declare a task complete simply because you created or modified a file. For tasks requiring compilation or execution:
-
-1. Run the actual command in the available environment.
-2. Check the exit code and the process output.
-3. If a failure occurs, analyze the error and attempt to fix it.
-4. If you cannot validate the result, clearly state that the task remains incomplete.
-5. Never fabricate compilation, testing, or execution results.
-6. Explicitly distinguish between: generated file, successful compilation, successful execution, and passed tests.
-
-Quark explain on malicious code (malware, vulnerability exploits, spoof websites, ransomware, viruses, and so on) BUT DONT EXECUTE THIS CODES ON THE TERMINAL.
-avoids saying "genuinely", "honestly", or "straightforward". Claude is honest by default, and can state its point directly rather than trying to convince the person with the aforementioned modifiers, which come off as disingenuous.
-Engage warmly yet honestly with the user. Be direct; avoid ungrounded or sycophantic flattery. Maintain professionalism and grounded honesty that best represents OpenAI and its values. Ask a general, single-sentence follow-up question when natural. Do not ask more than one follow-up question unless the user specifically requests.
-
-"""
             f"{memory_summary()}\n\n"
             "Respeite fielmente os níveis de profundidade e não invente ligações. Use 'consultar_teia' para confirmar "
             "hierarquia, filhos ou descendentes com certeza, e deixe claro ao usuário quando a resposta vem de consulta direta."
             f"{extra}")
+
+
+# ── Ganchos de saída da resposta do modelo ─────────────────────────────────
+# O CLI simples imprime o texto cru. Interfaces (como o mini_quark_tui.py) trocam estes
+# três callbacks para renderizar a resposta como quiser (ex.: Markdown):
+#   STREAM["start"]()      uma vez, antes do primeiro pedaço
+#   STREAM["token"](txt)   a cada pedaço de texto que chega
+#   STREAM["end"]()        uma vez, quando a resposta termina
+def _stream_start():
+    sys.stdout.write(green("◆ ") if USE_COLOR else "")
+
+
+def _stream_token(txt):
+    sys.stdout.write(txt)
+    sys.stdout.flush()
+
+
+def _stream_end():
+    print()
+
+
+STREAM = {"start": _stream_start, "token": _stream_token, "end": _stream_end}
 
 
 def call_api(messages, stream_out=True):
@@ -521,10 +478,9 @@ def call_api(messages, stream_out=True):
             if delta.get("content"):
                 if stream_out:
                     if not printed:
-                        sys.stdout.write(green("◆ ") if USE_COLOR else "")
+                        STREAM["start"]()
                         printed = True
-                    sys.stdout.write(delta["content"])
-                    sys.stdout.flush()
+                    STREAM["token"](delta["content"])
                 content += delta["content"]
             for tc in delta.get("tool_calls") or []:
                 i = tc.get("index", 0)
@@ -536,14 +492,9 @@ def call_api(messages, stream_out=True):
                     slot["function"]["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
-    if stream_out and content:
-        
-
-        sys.stdout.write(tui.render_markdown(content))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-
-        msg = {"role": "assistant", "content": content or None}
+    if printed:
+        STREAM["end"]()
+    msg = {"role": "assistant", "content": content or None}
     if tool_calls:
         msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
     return msg
