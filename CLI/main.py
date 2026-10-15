@@ -134,14 +134,13 @@ QUARK = [
     " ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝",
 ]
 DEMO_ART = r"""
-      .  *  .
-   *    _____    .
-  .   .'  o  '.   *
-     /  \ | /  \
- *  |  --(o)--  |  .
-     \  / | \  /
-  .   '._____.'   *
-    *    .    .
+        +
+ +      +      +
+   +    +   +
+++++++++++++++++++
+      + + +
+        +
+        +
 """.strip("\n")
 
 
@@ -244,6 +243,10 @@ def render_ansi(text):
         console.print(text, end="", no_wrap=True, overflow="crop", soft_wrap=True)
     return cap.get()
 
+def render_markdown(texto):
+    with console.capture() as captura:
+        console.print(Markdown(texto))
+    return captura.get()
 
 @lru_cache(maxsize=512)
 def sty(s, style):

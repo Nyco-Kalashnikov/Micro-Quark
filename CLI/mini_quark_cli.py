@@ -24,7 +24,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-
+from rich.markdown import Markdown
+import main as tui
 try:
     import readline  # noqa: F401  (histórico/edição de linha; não existe no Windows puro)
 except ImportError:
@@ -535,9 +536,14 @@ def call_api(messages, stream_out=True):
                     slot["function"]["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
-    if printed:
-        print()
-    msg = {"role": "assistant", "content": content or None}
+    if stream_out and content:
+        
+
+        sys.stdout.write(tui.render_markdown(content))
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+        msg = {"role": "assistant", "content": content or None}
     if tool_calls:
         msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
     return msg
