@@ -71,7 +71,8 @@ def default_state():
         "tools": [],
         "selected": "root",
         "config": {"apiKey": "", "model": "cohere/north-mini-code:free", "extra": "",
-                   "temperature": 0.7, "maxTokens": 4096, "auto": False, "think_aloud": False},
+                   "temperature": 0.7, "maxTokens": 4096, "auto": False, "think_aloud": False,
+                   "system_prompt": ""},
     }
 
 
@@ -404,8 +405,12 @@ def execute_tool(name, args):
     return f"Ferramenta desconhecida: {name}"
 
 
-# ───────────────────────────── API (OpenRouter, streaming) ───────────────────────────
+# ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────
 def system_prompt():
+    # Se o usuário definiu um system prompt customizado, usa ele inteiramente.
+    custom = S.get("config", {}).get("system_prompt")
+    if custom:
+        return custom
     ch = active_chat()
     extra = f"\nInstruções Globais do Usuário: {cfg('extra')}" if cfg("extra") else ""
     return (f'Você é o Mini-Quark, rodando 100% em um terminal (CLI). Você está conversando em: "{ch["title"]}".\n'
@@ -425,6 +430,14 @@ def system_prompt():
 #   STREAM["token"](txt)   a cada pedaço de texto que chega
 #   STREAM["end"]()        uma vez, quando a resposta termina
 def _stream_start():
+    # mostra um indicador de thinking antes do stream começar
+    try:
+        print(amber("thinking ↓"))
+    except Exception:
+        try:
+            print("thinking ↓")
+        except Exception:
+            pass
     sys.stdout.write(green("◆ ") if USE_COLOR else "")
 
 
@@ -588,6 +601,7 @@ HELP = f"""{bold('Comandos')}
   /temp <0-2>   /tokens <n>   /extra <instruções globais>
   /config                  mostra a configuração
   /think                   liga/desliga modo "think-aloud" (mostra pensamentos entre ((...)))
+  /sysprompt [arquivo|clear]   define / limpa o system prompt a partir de um arquivo (ou usa o último anexo se sem argumento)
 
 {bold('Arquivos')}
   /attach <caminho>        anexa um arquivo de texto à próxima mensagem
@@ -748,6 +762,32 @@ def handle_command(line):
             print(green(f"Anexado: {os.path.basename(path)} ({len(ATTACH)} pendente(s))"))
         except OSError as e:
             print(red(f"Não consegui ler: {e}"))
+    elif cmd == "sysprompt":
+        # define o system prompt a partir de arquivo ou do último anexo; /sysprompt clear limpa
+        if not arg:
+            if not ATTACH:
+                print(red("Uso: /sysprompt <caminho> | anexe um arquivo com /attach e rode /sysprompt sem argumento | /sysprompt clear"))
+            else:
+                a = ATTACH.pop(0)
+                S["config"]["system_prompt"] = a["content"]
+                save_state()
+                print(green(f"System prompt definido a partir do anexo: {a['name']}"))
+        else:
+            aarg = arg.strip()
+            if aarg.lower() in ("clear", "off", "none"):
+                S["config"]["system_prompt"] = ""
+                save_state()
+                print(green("System prompt removido. Voltando ao prompt padrão."))
+            else:
+                path = os.path.expanduser(aarg.strip('"\''))
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        data = f.read()
+                    S["config"]["system_prompt"] = data
+                    save_state()
+                    print(green(f"System prompt definido a partir de: {path}"))
+                except OSError as e:
+                    print(red(f"Não consegui ler o ficheiro: {e}"))
     elif cmd == "export":
         path = arg or "mini-quark-backup.json"
         data = {k: S[k] for k in ("v", "chats", "activeChatId", "graph")}
