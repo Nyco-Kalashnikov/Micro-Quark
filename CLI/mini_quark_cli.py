@@ -24,6 +24,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import re
 
 try:
     import readline  # noqa: F401  (histórico/edição de linha; não existe no Windows puro)
@@ -70,7 +71,7 @@ def default_state():
         "tools": [],
         "selected": "root",
         "config": {"apiKey": "", "model": "cohere/north-mini-code:free", "extra": "",
-                   "temperature": 0.7, "maxTokens": 4096, "auto": False},
+                   "temperature": 0.7, "maxTokens": 4096, "auto": False, "think_aloud": False},
     }
 
 
@@ -403,7 +404,7 @@ def execute_tool(name, args):
     return f"Ferramenta desconhecida: {name}"
 
 
-# ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────────
+# ───────────────────────────── API (OpenRouter, streaming) ───────────────────────────
 def system_prompt():
     ch = active_chat()
     extra = f"\nInstruções Globais do Usuário: {cfg('extra')}" if cfg("extra") else ""
@@ -458,7 +459,9 @@ def call_api(messages, stream_out=True):
     except urllib.error.URLError as e:
         raise RuntimeError(f"Sem conexão com a OpenRouter: {e.reason}")
 
-    content, tool_calls, printed = "", {}, False
+    content, tool_calls = "", {}
+    stream_started = False
+    think = cfg("think_aloud") if "think_aloud" in S["config"] else False
     with res:
         for raw in res:
             line = raw.decode("utf-8", "replace").strip()
@@ -475,12 +478,26 @@ def call_api(messages, stream_out=True):
                 raise RuntimeError(j["error"].get("message", "erro no stream"))
             ch = (j.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
+            # start the stream callbacks as soon as we receive any event (content or tool_calls)
+            if stream_out and not stream_started:
+                try:
+                    STREAM["start"]()
+                except Exception:
+                    pass
+                stream_started = True
             if delta.get("content"):
+                token = delta["content"]
+                # if think_aloud is enabled, render glimpses the model wraps in ((...)) in dim style
+                if think and token:
+                    try:
+                        token = re.sub(r"\(\((.*?)\)\)", lambda m: dim(m.group(1)), token, flags=re.S)
+                    except Exception:
+                        pass
                 if stream_out:
-                    if not printed:
-                        STREAM["start"]()
-                        printed = True
-                    STREAM["token"](delta["content"])
+                    try:
+                        STREAM["token"](token)
+                    except Exception:
+                        pass
                 content += delta["content"]
             for tc in delta.get("tool_calls") or []:
                 i = tc.get("index", 0)
@@ -492,8 +509,11 @@ def call_api(messages, stream_out=True):
                     slot["function"]["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
-    if printed:
-        STREAM["end"]()
+    if stream_started:
+        try:
+            STREAM["end"]()
+        except Exception:
+            pass
     msg = {"role": "assistant", "content": content or None}
     if tool_calls:
         msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
@@ -567,6 +587,7 @@ HELP = f"""{bold('Comandos')}
   /model [id]              mostra/troca o modelo
   /temp <0-2>   /tokens <n>   /extra <instruções globais>
   /config                  mostra a configuração
+  /think                   liga/desliga modo "think-aloud" (mostra pensamentos entre ((...)))
 
 {bold('Arquivos')}
   /attach <caminho>        anexa um arquivo de texto à próxima mensagem
@@ -715,6 +736,10 @@ def handle_command(line):
         for k, v in c_.items():
             print(f"  {k:12} {v}")
         print(dim(f"  estado em    {STATE_FILE}"))
+    elif cmd == "think":
+        S["config"]["think_aloud"] = not cfg("think_aloud")
+        save_state()
+        print(amber("Think-aloud LIGADO — o modelo mostrará pensamentos entre ((...)).") if cfg("think_aloud") else green("Think-aloud desligado."))
     elif cmd == "attach":
         path = os.path.expanduser(arg.strip('"\''))
         try:
@@ -804,6 +829,8 @@ def main():
         print(amber("  Sem API key. Use /key ou exporte OPENROUTER_API_KEY."))
     if cfg("auto"):
         print(amber("  ⚠ Execução automática de ferramentas está LIGADA (/auto para desligar)."))
+    if cfg("think_aloud"):
+        print(amber("  🧠 Think-aloud ativado: pensamentos serão mostrados entre ((...))."))
 
     while True:
         try:
