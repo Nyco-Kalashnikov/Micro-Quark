@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 mini-quark TUI — tela cheia a 60 fps, no estilo do Gemini CLI.
@@ -270,7 +271,8 @@ def footer_ansi(width):
     left = short_cwd()
     auto = mq.AUTO or mq.cfg("auto")
     mid, mid_style = ("auto-exec (cuidado)", "#e2685c") if auto else ("confirm before exec", "#e8a94c")
-    right = f"{mq.cfg('model')} ({len(mq.active_chat()['history'])} msgs)"
+    ap = mq.active_prompt()
+    right = f"{mq.cfg('model')}" + (f" · ✎ {ap[0]}" if ap else "") + f" ({len(mq.active_chat()['history'])} msgs)"
     total = len(left) + len(mid) + len(right)
     if total + 2 > width:
         mid, total = "", len(left) + len(right)
@@ -348,6 +350,41 @@ def render_assistant(text, width):
     return [(mark if i == 0 else "  ") + line for i, line in enumerate(body)]
 
 
+DIMIT = "\033[2;3m"   # esmaecido + itálico
+
+
+def _think_lines(text, width):
+    out = []
+    for raw in text.strip().split("\n"):
+        out.extend(wrap_ansi(raw, width))
+    return out
+
+
+def render_think(text, secs, width, mode, live=False):
+    """Raciocínio do modelo → linhas. mode: summary | full | off. live = ainda em andamento."""
+    if mode == "off":
+        return []
+    body = _think_lines(text, max(width - 4, 10))
+    if live:   # mostra só as últimas linhas, para não ocupar a tela enquanto pensa
+        rows = [sty(f"✻ Pensando… {secs:.0f}s", "dim")]
+        rows += [f"{DIMIT}  ┊ {l}{RESET}" for l in body[-6:]]
+        return rows
+    n = len(text.split())
+    if mode == "summary":
+        hint = "  (/think full expande)" if width > 60 else ""
+        return [sty(f"✻ Pensou por {secs}s · {n} palavras{hint}", "dim")]
+    rows = [sty(f"✻ Pensou por {secs}s", "dim")]
+    rows += [f"{DIMIT}  ┊ {l}{RESET}" for l in body]
+    return rows + [""]
+
+
+class ThinkBlock:
+    __slots__ = ("text", "secs")
+
+    def __init__(self, text, secs):
+        self.text, self.secs = text, secs
+
+
 class MdBlock:
     __slots__ = ("text",)
 
@@ -363,12 +400,14 @@ class Log:
         self.lines = []        # linhas completas (str crua) ou MdBlock (resposta do modelo)
         self.partial = ""      # linha em andamento
         self.md = None         # texto da resposta em streaming (None = sem resposta aberta)
+        self.think = None      # [texto, t0] do raciocínio em andamento
         self.rows = []         # linhas visuais das completas
         self.rows_upto = 0
         self.width = None
         self.dirty = False
         self._p_key, self._p_rows = None, []
         self._m_key, self._m_rows, self._m_t = None, [], 0.0
+        self._t_key, self._t_rows, self._t_t = None, [], 0.0
 
     # ---- escrita (qualquer thread) ----
     def write(self, s):
@@ -382,6 +421,27 @@ class Log:
             if len(self.lines) > 4000:
                 del self.lines[:1000]
                 self.dirty = True
+
+    def think_start(self):
+        with self.lock:
+            if self.partial:
+                self.lines.append(self.partial)
+                self.partial = ""
+            self.think = ["", time.time()]
+
+    def think_token(self, txt):
+        with self.lock:
+            if self.think is None:
+                self.think = ["", time.time()]
+            self.think[0] += txt
+
+    def think_end(self, secs=None):
+        with self.lock:
+            if self.think is not None:
+                text, t0 = self.think
+                self.think = None
+                if text.strip():
+                    self.lines.append(ThinkBlock(text, secs if secs is not None else round(time.time() - t0, 1)))
 
     def md_start(self):
         with self.lock:
@@ -405,7 +465,7 @@ class Log:
 
     def clear(self):
         with self.lock:
-            self.lines, self.partial, self.md = [], "", None
+            self.lines, self.partial, self.md, self.think = [], "", None, None
             self.dirty = True
 
     # ---- leitura (thread principal) ----
@@ -414,12 +474,16 @@ class Log:
             full = self.dirty or width != self.width
             lines = list(self.lines) if full else list(self.lines[self.rows_upto:])
             partial, md = self.partial, self.md
+            think = list(self.think) if self.think is not None else None
             if full:
                 self.width, self.rows, self.rows_upto, self.dirty = width, [], 0, False
             self.rows_upto += len(lines)
         # trabalho pesado (rich) fora do lock: a thread do modelo nunca espera por ele
+        tmode = mq.cfg("thinking")
         for item in lines:
-            if isinstance(item, MdBlock):
+            if isinstance(item, ThinkBlock):
+                self.rows.extend(render_think(item.text, item.secs, width, tmode))
+            elif isinstance(item, MdBlock):
                 self.rows.extend(render_assistant(item.text, width))
             else:
                 self.rows.extend(wrap_ansi(item, width))
@@ -428,6 +492,14 @@ class Log:
             self._p_key = key
             self._p_rows = wrap_ansi(partial, width) if partial else []
         now = time.time()
+        if think is None:
+            self._t_key, self._t_rows = None, []
+        else:
+            secs = now - think[1]
+            key = (think[0], width, int(secs), tmode)
+            if key != self._t_key and (now - self._t_t >= 0.05 or not self._t_rows):
+                self._t_key, self._t_t = key, now
+                self._t_rows = render_think(think[0], secs, width, tmode, live=True)
         if md is None:
             self._m_key, self._m_rows = None, []
         else:
@@ -438,19 +510,18 @@ class Log:
                 self._m_rows = render_assistant(md, width) if md.strip() else []
 
     def count(self):
-        return len(self.rows) + len(self._m_rows) + len(self._p_rows)
+        return len(self.rows) + len(self._t_rows) + len(self._m_rows) + len(self._p_rows)
 
     def get(self, i):
-        n = len(self.rows)
-        if i < n:
-            return self.rows[i]
-        i -= n
-        m = len(self._m_rows)
-        return self._m_rows[i] if i < m else self._p_rows[i - m]
+        for part in (self.rows, self._t_rows, self._m_rows):
+            if i < len(part):
+                return part[i]
+            i -= len(part)
+        return self._p_rows[i]
 
     @property
     def empty(self):
-        return not self.lines and not self.partial and self.md is None
+        return not self.lines and not self.partial and self.md is None and self.think is None
 
 
 class LogOut(io.TextIOBase):
@@ -1073,7 +1144,8 @@ class App:
             status = sty("Permitir? ", "bold #e8a94c") + sty("[s]im  [N]ão  [a]sempre nesta sessão", "#e8a94c")
         elif self.busy:
             sp = SPIN[int(now * 12) % len(SPIN)]
-            status = sty(f"{sp} pensando…", "#7fb2ff") + sty("  (Ctrl+C interrompe)", "dim")
+            label = "raciocinando…" if self.log.think is not None else "pensando…"
+            status = sty(f"{sp} {label}", "#7fb2ff") + sty("  (Ctrl+C interrompe)", "dim")
         elif self.notice and now < self.notice_t:
             status = sty(self.notice, "#e8a94c")
         elif self.mode == "art_paste":
@@ -1214,6 +1286,8 @@ class App:
                 print(mq.amber("Aqui use: /key <sua-chave>   (ou exporte OPENROUTER_API_KEY)\n")); return
             try:
                 mq.handle_command(text)
+                if cmd == "think":
+                    self.log.dirty = True   # re-renderiza raciocínios já mostrados no novo modo
                 if cmd in ("help", "h", "?"):
                     print("\n" + mq.bold("Interface"))
                     print("  /cls [all]               limpa a tela (all = e o histórico do ↑)")
@@ -1239,7 +1313,8 @@ class App:
             except BaseException as e:  # inclui KeyboardInterrupt injetado
                 print(mq.red(f"\n[interrompido: {e.__class__.__name__}]"))
             finally:
-                self.log.md_end()   # fecha a resposta se foi interrompida no meio
+                self.log.think_end()   # fecha raciocínio/resposta se foram interrompidos no meio
+                self.log.md_end()
                 self.busy = False
                 print()
 
@@ -1340,7 +1415,9 @@ def main():
 
     APP = App()
     mq.confirm = APP.ask_confirm
-    mq.STREAM = {"start": APP.log.md_start, "token": APP.log.md_token, "end": APP.log.md_end}
+    mq.STREAM = {"start": APP.log.md_start, "token": APP.log.md_token, "end": APP.log.md_end,
+                 "think_start": APP.log.think_start, "think_token": APP.log.think_token,
+                 "think_end": APP.log.think_end}
     proxy = LogOut(APP.log)
     sys.stdout = sys.stderr = proxy
     atexit.register(restore_terminal)

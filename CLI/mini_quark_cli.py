@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -70,9 +71,17 @@ def default_state():
         "graph": {"nodes": [default_root()], "links": []},
         "tools": [],
         "selected": "root",
+        "prompts": {},          # nome -> texto (system prompts customizados)
+        "activePrompt": "",     # prompt global em uso ("" = padrão)
         "config": {"apiKey": "", "model": "cohere/north-mini-code:free", "extra": "",
+<<<<<<< HEAD
                    "temperature": 0.7, "maxTokens": 4096, "auto": False, "think_aloud": False,
                    "system_prompt": ""},
+=======
+                   "temperature": 0.7, "maxTokens": 4096, "auto": False,
+                   "promptMode": "replace", "promptMemory": True,
+                   "thinking": "summary", "effort": "auto"},
+>>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     }
 
 
@@ -85,7 +94,7 @@ def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        for k in ("chats", "activeChatId", "graph", "tools", "selected"):
+        for k in ("chats", "activeChatId", "graph", "tools", "selected", "prompts", "activePrompt"):
             if k in data:
                 base[k] = data[k]
         base["config"].update(data.get("config", {}))
@@ -405,30 +414,79 @@ def execute_tool(name, args):
     return f"Ferramenta desconhecida: {name}"
 
 
+<<<<<<< HEAD
 # ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────
 def system_prompt():
     # Se o usuário definiu um system prompt customizado, usa ele inteiramente.
     custom = S.get("config", {}).get("system_prompt")
     if custom:
         return custom
+=======
+# ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────────
+DEFAULT_PERSONA = ('Você é o Mini-Quark, rodando 100% em um terminal. Você está conversando em: "{chat}".\n'
+                   "Seja direto e objetivo. Você pode executar comandos com 'executar_terminal' — o resultado "
+                   "(exit code, stdout, stderr) volta para você. Pode usar Markdown simples nas respostas.")
+MEMORY_RULES = ("Contexto Completo da Teia de Memória Persistente (estrutura hierárquica real, indentação = profundidade):\n"
+                "{memory}\n\n"
+                "Respeite fielmente os níveis de profundidade e não invente ligações. Use 'consultar_teia' para confirmar "
+                "hierarquia, filhos ou descendentes com certeza, e deixe claro ao usuário quando a resposta vem de consulta direta.")
+PROMPT_VARS = {
+    "chat": "título da conversa atual", "date": "data e hora atuais", "cwd": "pasta de trabalho",
+    "os": "sistema operacional", "model": "modelo em uso", "memory": "a teia de memória (já formatada)",
+    "extra": "instruções globais definidas com /extra",
+}
+
+
+def prompts():
+    return S.setdefault("prompts", {})
+
+
+def active_prompt():
+    """(nome, texto, escopo) do system prompt em uso, ou None para o padrão.
+    Prioridade: prompt da conversa > prompt global."""
+>>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     ch = active_chat()
-    extra = f"\nInstruções Globais do Usuário: {cfg('extra')}" if cfg("extra") else ""
-    return (f'Você é o Mini-Quark, rodando 100% em um terminal (CLI). Você está conversando em: "{ch["title"]}".\n'
-            "Seja direto e objetivo. Você pode executar comandos com 'executar_terminal' — o resultado "
-            "(exit code, stdout, stderr) volta para você. O usuário vê o texto puro, sem renderização de markdown pesada.\n\n"
-            "Contexto Completo da Teia de Memória Persistente (estrutura hierárquica real, indentação = profundidade):\n"
-            f"{memory_summary()}\n\n"
-            "Respeite fielmente os níveis de profundidade e não invente ligações. Use 'consultar_teia' para confirmar "
-            "hierarquia, filhos ou descendentes com certeza, e deixe claro ao usuário quando a resposta vem de consulta direta."
-            f"{extra}")
+    for scope, name in (("conversa", ch.get("prompt")), ("global", S.get("activePrompt"))):
+        if name and name in prompts():
+            return name, prompts()[name], scope
+    return None
+
+
+def fill_vars(text):
+    vals = {"chat": active_chat()["title"], "date": time.strftime("%Y-%m-%d %H:%M"), "cwd": os.getcwd(),
+            "os": platform.platform(), "model": cfg("model"), "memory": memory_summary(), "extra": cfg("extra")}
+    return re.sub(r"\{(%s)\}" % "|".join(vals), lambda m: str(vals[m.group(1)]), text)
+
+
+def system_prompt():
+    ap = active_prompt()
+    uses_extra = bool(ap and "{extra}" in ap[1])
+    extra = f"\nInstruções Globais do Usuário: {cfg('extra')}" if cfg("extra") and not uses_extra else ""
+    if not ap:
+        return fill_vars(DEFAULT_PERSONA) + "\n\n" + fill_vars(MEMORY_RULES) + extra
+    _, text, _ = ap
+    body = fill_vars(text)
+    if cfg("promptMode") == "append":
+        body = fill_vars(DEFAULT_PERSONA) + "\n\n" + body
+    if "{memory}" not in text and cfg("promptMemory"):
+        body += "\n\n" + fill_vars(MEMORY_RULES)
+    return body + extra
 
 
 # ── Ganchos de saída da resposta do modelo ─────────────────────────────────
 # O CLI simples imprime o texto cru. Interfaces (como o mini_quark_tui.py) trocam estes
-# três callbacks para renderizar a resposta como quiser (ex.: Markdown):
-#   STREAM["start"]()      uma vez, antes do primeiro pedaço
-#   STREAM["token"](txt)   a cada pedaço de texto que chega
-#   STREAM["end"]()        uma vez, quando a resposta termina
+# callbacks para renderizar a resposta como quiser (ex.: Markdown):
+#   STREAM["start"]()            uma vez, antes do primeiro pedaço da RESPOSTA
+#   STREAM["token"](txt)         a cada pedaço de texto da resposta
+#   STREAM["end"]()              quando a resposta termina
+#   STREAM["think_start"]()      o modelo começou a "pensar" (raciocínio), se suportado
+#   STREAM["think_token"](txt)   pedaço do raciocínio
+#   STREAM["think_end"](segundos)  fim do raciocínio
+# Modo de exibição do raciocínio: cfg("thinking") = "summary" | "full" | "off".
+LAST_THOUGHTS = []   # [(segundos, texto)] do último turno — usado por /think last
+_T = {"words": 0}
+
+
 def _stream_start():
     # mostra um indicador de thinking antes do stream começar
     try:
@@ -450,12 +508,73 @@ def _stream_end():
     print()
 
 
-STREAM = {"start": _stream_start, "token": _stream_token, "end": _stream_end}
+def _think_start():
+    _T["words"] = 0
+    if cfg("thinking") == "full":
+        sys.stdout.write(dim("✻ "))
+
+
+def _think_token(txt):
+    _T["words"] += len(txt.split())
+    if cfg("thinking") == "full":
+        sys.stdout.write(dim(txt))
+        sys.stdout.flush()
+
+
+def _think_end(secs):
+    mode = cfg("thinking")
+    if mode == "full":
+        print()
+    elif mode == "summary":
+        print(dim(f"✻ pensou por {secs}s · ~{_T['words']} palavras  (/think last para ver)"))
+
+
+STREAM = {"start": _stream_start, "token": _stream_token, "end": _stream_end,
+          "think_start": _think_start, "think_token": _think_token, "think_end": _think_end}
+
+
+class _ThinkSplitter:
+    """Separa <think>...</think> embutido no texto (alguns modelos raciocinam assim)."""
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self):
+        self.inside, self.buf = False, ""
+
+    def feed(self, s):
+        self.buf += s
+        out = []
+        while True:
+            tag = self.CLOSE if self.inside else self.OPEN
+            i = self.buf.find(tag)
+            if i >= 0:
+                if i:
+                    out.append(("think" if self.inside else "text", self.buf[:i]))
+                self.buf = self.buf[i + len(tag):]
+                self.inside = not self.inside
+                continue
+            keep = 0  # guarda um possível começo de tag cortado no fim do pedaço
+            for k in range(min(len(tag) - 1, len(self.buf)), 0, -1):
+                if tag.startswith(self.buf[-k:]):
+                    keep = k
+                    break
+            emit = self.buf[:len(self.buf) - keep]
+            if emit:
+                out.append(("think" if self.inside else "text", emit))
+            self.buf = self.buf[len(self.buf) - keep:]
+            return out
+
+    def flush(self):
+        rest, self.buf = self.buf, ""
+        return [("think" if self.inside else "text", rest)] if rest else []
 
 
 def call_api(messages, stream_out=True):
-    body = json.dumps({"model": cfg("model"), "messages": messages, "tools": all_tools(), "tool_choice": "auto",
-                       "temperature": cfg("temperature"), "max_tokens": cfg("maxTokens"), "stream": True}).encode()
+    payload_obj = {"model": cfg("model"), "messages": messages, "tools": all_tools(), "tool_choice": "auto",
+                   "temperature": cfg("temperature"), "max_tokens": cfg("maxTokens"), "stream": True}
+    effort = cfg("effort")
+    if effort and effort != "auto":  # "auto" = não manda nada; o modelo decide
+        payload_obj["reasoning"] = {"effort": "none" if effort == "off" else effort}
+    body = json.dumps(payload_obj).encode()
     req = urllib.request.Request(API_URL, data=body, method="POST", headers={
         "Authorization": f"Bearer {api_key()}", "Content-Type": "application/json",
         "X-Title": "mini-quark-cli"})
@@ -472,9 +591,52 @@ def call_api(messages, stream_out=True):
     except urllib.error.URLError as e:
         raise RuntimeError(f"Sem conexão com a OpenRouter: {e.reason}")
 
+<<<<<<< HEAD
     content, tool_calls = "", {}
     stream_started = False
     think = cfg("think_aloud") if "think_aloud" in S["config"] else False
+=======
+    tool_calls = {}
+    st = {"content": "", "printed": False, "t_open": False, "t0": 0.0, "t_text": ""}
+    splitter = _ThinkSplitter()
+
+    def think_chunk(t):
+        if not t:
+            return
+        if not st["t_open"]:
+            st.update(t_open=True, t0=time.time(), t_text="")
+            if stream_out:
+                STREAM["think_start"]()
+        st["t_text"] += t
+        if stream_out:
+            STREAM["think_token"](t)
+
+    def think_close():
+        if st["t_open"]:
+            secs = round(time.time() - st["t0"], 1)
+            st["t_open"] = False
+            LAST_THOUGHTS.append((secs, st["t_text"]))
+            if stream_out:
+                STREAM["think_end"](secs)
+
+    def text_chunk(t):
+        think_close()
+        if not st["printed"]:
+            t = t.lstrip("\n")
+        if not t:
+            return
+        if stream_out:
+            if not st["printed"]:
+                STREAM["start"]()
+            STREAM["token"](t)
+        st["printed"] = True
+        st["content"] += t
+
+    def feed_content(txt):
+        for kind, piece in splitter.feed(txt):
+            think_chunk(piece) if kind == "think" else text_chunk(piece)
+
+>>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     with res:
         for raw in res:
             line = raw.decode("utf-8", "replace").strip()
@@ -491,6 +653,7 @@ def call_api(messages, stream_out=True):
                 raise RuntimeError(j["error"].get("message", "erro no stream"))
             ch = (j.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
+<<<<<<< HEAD
             # start the stream callbacks as soon as we receive any event (content or tool_calls)
             if stream_out and not stream_started:
                 try:
@@ -512,6 +675,13 @@ def call_api(messages, stream_out=True):
                     except Exception:
                         pass
                 content += delta["content"]
+=======
+            r = delta.get("reasoning") or delta.get("reasoning_content")  # OpenRouter / DeepSeek
+            if isinstance(r, str) and r:
+                think_chunk(r)
+            if delta.get("content"):
+                feed_content(delta["content"])
+>>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
             for tc in delta.get("tool_calls") or []:
                 i = tc.get("index", 0)
                 slot = tool_calls.setdefault(i, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
@@ -522,11 +692,20 @@ def call_api(messages, stream_out=True):
                     slot["function"]["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
+<<<<<<< HEAD
     if stream_started:
         try:
             STREAM["end"]()
         except Exception:
             pass
+=======
+    for kind, piece in splitter.flush():
+        think_chunk(piece) if kind == "think" else text_chunk(piece)
+    think_close()
+    if st["printed"] and stream_out:
+        STREAM["end"]()
+    content = st["content"]
+>>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     msg = {"role": "assistant", "content": content or None}
     if tool_calls:
         msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
@@ -534,6 +713,7 @@ def call_api(messages, stream_out=True):
 
 
 def chat_turn(user_text):
+    LAST_THOUGHTS.clear()
     ch = active_chat()
     ch["history"].append({"role": "user", "content": user_text})
     save_state()
@@ -599,6 +779,9 @@ HELP = f"""{bold('Comandos')}
   /key [chave]             define a API key (ou usa $OPENROUTER_API_KEY)
   /model [id]              mostra/troca o modelo
   /temp <0-2>   /tokens <n>   /extra <instruções globais>
+  /prompt                  system prompts customizados (list|save|use|chat|off|show|rm|file|mode|memory|vars)
+  /think [full|summary|off|last]   mostra o raciocínio do modelo (se suportado)
+  /effort auto|minimal|low|medium|high|off   esforço de raciocínio pedido ao modelo
   /config                  mostra a configuração
   /think                   liga/desliga modo "think-aloud" (mostra pensamentos entre ((...)))
   /sysprompt [arquivo|clear]   define / limpa o system prompt a partir de um arquivo (ou usa o último anexo se sem argumento)
@@ -619,6 +802,119 @@ def pick_chat(arg):
     if arg.isdigit() and 1 <= int(arg) <= len(S["chats"]):
         return S["chats"][int(arg) - 1]
     return next((c_ for c_ in S["chats"] if c_["id"] == arg or c_["title"].lower() == arg.lower()), None)
+
+
+def handle_prompt_cmd(arg):
+    parts = arg.split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    P = prompts()
+    name_ok = lambda n: bool(re.fullmatch(r"[\w.-]{1,40}", n or ""))
+
+    if sub in ("", "status"):
+        ap = active_prompt()
+        if ap:
+            name, text, scope = ap
+            print(f"System prompt: {bold(name)} {dim('(' + scope + ', modo ' + cfg('promptMode') + ', memória ' + ('on' if cfg('promptMemory') else 'off') + ')')}")
+            print(dim("  " + text.strip().replace("\n", "\n  ")[:400] + ("…" if len(text) > 400 else "")))
+        else:
+            print(f"System prompt: {bold('padrão')}  {dim('(/prompt default mostra o texto)')}")
+        print(dim("  /prompt list · save · use · chat · off · show · rm · file · mode · memory · vars"))
+    elif sub == "list":
+        if not P:
+            print(dim("Nenhum prompt salvo. Crie com: /prompt save <nome> <texto>"))
+        g, c_ = S.get("activePrompt"), active_chat().get("prompt")
+        for n in sorted(P):
+            tag = (green("● global ") if n == g else "") + (amber("◆ conversa ") if n == c_ else "")
+            print(f"  {bold(n):20} {dim(str(len(P[n])) + ' caracteres')} {tag}")
+    elif sub in ("save", "new", "set"):
+        p2 = rest.split(None, 1)
+        if len(p2) < 2 or not name_ok(p2[0]):
+            print(red("Uso: /prompt save <nome> <texto do prompt>   (nome: letras, números, . _ -)"))
+        else:
+            P[p2[0]] = p2[1].strip()
+            save_state()
+            print(green(f"Prompt '{p2[0]}' salvo. Ative com: /prompt use {p2[0]}"))
+    elif sub == "file":
+        p2 = rest.split(None, 1)
+        if len(p2) < 2 or not name_ok(p2[0]):
+            print(red("Uso: /prompt file <nome> <caminho>"))
+        else:
+            try:
+                with open(os.path.expanduser(p2[1].strip("\"'")), encoding="utf-8") as f:
+                    P[p2[0]] = f.read().strip()
+                save_state()
+                print(green(f"Prompt '{p2[0]}' carregado de arquivo ({len(P[p2[0]])} caracteres)."))
+            except OSError as e:
+                print(red(f"Não consegui ler: {e}"))
+    elif sub == "use":
+        if rest not in P:
+            print(red("Prompt não encontrado. Veja /prompt list"))
+        else:
+            S["activePrompt"] = rest
+            save_state()
+            print(green(f"System prompt global: {rest}"))
+    elif sub == "chat":
+        ch = active_chat()
+        if rest.lower() in ("off", "none", ""):
+            ch.pop("prompt", None)
+            save_state()
+            print(green("Esta conversa volta a usar o prompt global."))
+        elif rest not in P:
+            print(red("Prompt não encontrado. Veja /prompt list"))
+        else:
+            ch["prompt"] = rest
+            save_state()
+            print(green(f"Prompt '{rest}' só para a conversa '{ch['title']}'."))
+    elif sub in ("off", "default") and not rest:
+        if sub == "off":
+            S["activePrompt"] = ""
+            save_state()
+            print(green("Prompt global desativado (usando o padrão)."))
+        else:
+            print(dim("── persona padrão ──"))
+            print(DEFAULT_PERSONA)
+            print(dim("── regras da teia de memória ──"))
+            print(MEMORY_RULES)
+    elif sub == "show":
+        n = rest or (active_prompt() or (None,))[0]
+        if n in P:
+            print(P[n])
+        else:
+            print(red("Prompt não encontrado. Veja /prompt list"))
+    elif sub in ("rm", "del", "delete"):
+        if rest in P:
+            del P[rest]
+            if S.get("activePrompt") == rest:
+                S["activePrompt"] = ""
+            for c_ in S["chats"]:
+                if c_.get("prompt") == rest:
+                    c_.pop("prompt")
+            save_state()
+            print(green(f"Prompt '{rest}' removido."))
+        else:
+            print(red("Prompt não encontrado."))
+    elif sub == "mode":
+        if rest.lower() in ("replace", "append"):
+            S["config"]["promptMode"] = rest.lower()
+            save_state()
+            print(green("replace: seu prompt substitui a persona padrão" if rest.lower() == "replace"
+                        else "append: seu prompt vem DEPOIS da persona padrão"))
+        else:
+            print(red("Uso: /prompt mode replace|append"))
+    elif sub == "memory":
+        if rest.lower() in ("on", "off"):
+            S["config"]["promptMemory"] = rest.lower() == "on"
+            save_state()
+            print(green("A teia de memória " + ("será" if rest.lower() == "on" else "NÃO será") +
+                        " anexada automaticamente (use {memory} para posicionar manualmente)."))
+        else:
+            print(red("Uso: /prompt memory on|off"))
+    elif sub == "vars":
+        for k, v in PROMPT_VARS.items():
+            print(f"  {bold('{' + k + '}'):12} {dim(v)}")
+    else:
+        print(red("Subcomando desconhecido. /prompt (sem argumentos) mostra as opções."))
 
 
 def handle_command(line):
@@ -740,6 +1036,31 @@ def handle_command(line):
             save_state()
         else:
             print(red("Uso: /tokens 4096"))
+    elif cmd in ("prompt", "system"):
+        handle_prompt_cmd(arg)
+    elif cmd == "think":
+        a_ = arg.lower()
+        if a_ in ("full", "summary", "off"):
+            S["config"]["thinking"] = a_
+            save_state()
+            print(green(f"Raciocínio: {a_}"))
+        elif a_ == "last":
+            if not LAST_THOUGHTS:
+                print(dim("Nenhum raciocínio na última resposta (o modelo pode não suportar)."))
+            for secs, text in LAST_THOUGHTS:
+                print(dim(f"✻ pensou por {secs}s"))
+                print(dim(text.strip()) + "\n")
+        else:
+            print(f"Exibição do raciocínio: {bold(cfg('thinking'))} · esforço pedido ao modelo: {bold(cfg('effort'))}")
+            print(dim("  /think full|summary|off · /think last · /effort auto|minimal|low|medium|high|off"))
+    elif cmd == "effort":
+        a_ = arg.lower()
+        if a_ in ("auto", "minimal", "low", "medium", "high", "off"):
+            S["config"]["effort"] = a_
+            save_state()
+            print(green(f"Esforço de raciocínio: {a_}" + (" (o modelo decide)" if a_ == "auto" else "")))
+        else:
+            print(red("Uso: /effort auto|minimal|low|medium|high|off"))
     elif cmd == "extra":
         S["config"]["extra"] = arg
         save_state()
@@ -792,6 +1113,7 @@ def handle_command(line):
         path = arg or "mini-quark-backup.json"
         data = {k: S[k] for k in ("v", "chats", "activeChatId", "graph")}
         data["tools"] = S["tools"]
+        data["prompts"], data["activePrompt"] = S.get("prompts", {}), S.get("activePrompt", "")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print(green(f"Backup salvo em {path} (sem a API key)."))
@@ -809,6 +1131,9 @@ def handle_command(line):
                 S["selected"] = "root"
             if isinstance(j.get("tools"), list):
                 S["tools"] = [t for t in j["tools"] if isinstance(t, list) and len(t) == 2]
+            if isinstance(j.get("prompts"), dict):
+                S["prompts"] = {str(k): str(v) for k, v in j["prompts"].items()}
+                S["activePrompt"] = j.get("activePrompt", "") if j.get("activePrompt", "") in S["prompts"] else ""
             save_state()
             print(green("Backup importado."))
         except (OSError, ValueError) as e:
