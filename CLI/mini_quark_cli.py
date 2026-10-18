@@ -25,7 +25,12 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import re
+
+for _stream in (sys.stdout, sys.stderr, sys.stdin):
+    try:  # terminal não-UTF-8 (LANG=pt_BR.ISO-8859-1, PYTHONIOENCODING=ascii...): troca o que não couber por "?"
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 try:
     import readline  # noqa: F401  (histórico/edição de linha; não existe no Windows puro)
@@ -74,14 +79,9 @@ def default_state():
         "prompts": {},          # nome -> texto (system prompts customizados)
         "activePrompt": "",     # prompt global em uso ("" = padrão)
         "config": {"apiKey": "", "model": "cohere/north-mini-code:free", "extra": "",
-<<<<<<< HEAD
-                   "temperature": 0.7, "maxTokens": 4096, "auto": False, "think_aloud": False,
-                   "system_prompt": ""},
-=======
                    "temperature": 0.7, "maxTokens": 4096, "auto": False,
                    "promptMode": "replace", "promptMemory": True,
                    "thinking": "summary", "effort": "auto"},
->>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     }
 
 
@@ -274,7 +274,7 @@ def confirm(kind, detail):
     if len(str(detail).splitlines()) > 25:
         print("   " + dim("..."))
     try:
-        ans = input(amber("   Permitir? [s/N/a=sempre nesta sessão] ")).strip().lower()
+        ans = input(rl_prompt(amber("   Permitir? [s/N/a=sempre nesta sessão] "))).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -414,14 +414,6 @@ def execute_tool(name, args):
     return f"Ferramenta desconhecida: {name}"
 
 
-<<<<<<< HEAD
-# ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────
-def system_prompt():
-    # Se o usuário definiu um system prompt customizado, usa ele inteiramente.
-    custom = S.get("config", {}).get("system_prompt")
-    if custom:
-        return custom
-=======
 # ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────────
 DEFAULT_PERSONA = ('Você é o Mini-Quark, rodando 100% em um terminal. Você está conversando em: "{chat}".\n'
                    "Seja direto e objetivo. Você pode executar comandos com 'executar_terminal' — o resultado "
@@ -444,7 +436,6 @@ def prompts():
 def active_prompt():
     """(nome, texto, escopo) do system prompt em uso, ou None para o padrão.
     Prioridade: prompt da conversa > prompt global."""
->>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     ch = active_chat()
     for scope, name in (("conversa", ch.get("prompt")), ("global", S.get("activePrompt"))):
         if name and name in prompts():
@@ -488,14 +479,6 @@ _T = {"words": 0}
 
 
 def _stream_start():
-    # mostra um indicador de thinking antes do stream começar
-    try:
-        print(amber("thinking ↓"))
-    except Exception:
-        try:
-            print("thinking ↓")
-        except Exception:
-            pass
     sys.stdout.write(green("◆ ") if USE_COLOR else "")
 
 
@@ -591,11 +574,6 @@ def call_api(messages, stream_out=True):
     except urllib.error.URLError as e:
         raise RuntimeError(f"Sem conexão com a OpenRouter: {e.reason}")
 
-<<<<<<< HEAD
-    content, tool_calls = "", {}
-    stream_started = False
-    think = cfg("think_aloud") if "think_aloud" in S["config"] else False
-=======
     tool_calls = {}
     st = {"content": "", "printed": False, "t_open": False, "t0": 0.0, "t_text": ""}
     splitter = _ThinkSplitter()
@@ -636,7 +614,6 @@ def call_api(messages, stream_out=True):
         for kind, piece in splitter.feed(txt):
             think_chunk(piece) if kind == "think" else text_chunk(piece)
 
->>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     with res:
         for raw in res:
             line = raw.decode("utf-8", "replace").strip()
@@ -653,35 +630,11 @@ def call_api(messages, stream_out=True):
                 raise RuntimeError(j["error"].get("message", "erro no stream"))
             ch = (j.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
-<<<<<<< HEAD
-            # start the stream callbacks as soon as we receive any event (content or tool_calls)
-            if stream_out and not stream_started:
-                try:
-                    STREAM["start"]()
-                except Exception:
-                    pass
-                stream_started = True
-            if delta.get("content"):
-                token = delta["content"]
-                # if think_aloud is enabled, render glimpses the model wraps in ((...)) in dim style
-                if think and token:
-                    try:
-                        token = re.sub(r"\(\((.*?)\)\)", lambda m: dim(m.group(1)), token, flags=re.S)
-                    except Exception:
-                        pass
-                if stream_out:
-                    try:
-                        STREAM["token"](token)
-                    except Exception:
-                        pass
-                content += delta["content"]
-=======
             r = delta.get("reasoning") or delta.get("reasoning_content")  # OpenRouter / DeepSeek
             if isinstance(r, str) and r:
                 think_chunk(r)
             if delta.get("content"):
                 feed_content(delta["content"])
->>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
             for tc in delta.get("tool_calls") or []:
                 i = tc.get("index", 0)
                 slot = tool_calls.setdefault(i, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
@@ -692,20 +645,12 @@ def call_api(messages, stream_out=True):
                     slot["function"]["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
-<<<<<<< HEAD
-    if stream_started:
-        try:
-            STREAM["end"]()
-        except Exception:
-            pass
-=======
     for kind, piece in splitter.flush():
         think_chunk(piece) if kind == "think" else text_chunk(piece)
     think_close()
     if st["printed"] and stream_out:
         STREAM["end"]()
     content = st["content"]
->>>>>>> 8551938 (Interface Web e sistema de Custom system prompt)
     msg = {"role": "assistant", "content": content or None}
     if tool_calls:
         msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
@@ -783,8 +728,6 @@ HELP = f"""{bold('Comandos')}
   /think [full|summary|off|last]   mostra o raciocínio do modelo (se suportado)
   /effort auto|minimal|low|medium|high|off   esforço de raciocínio pedido ao modelo
   /config                  mostra a configuração
-  /think                   liga/desliga modo "think-aloud" (mostra pensamentos entre ((...)))
-  /sysprompt [arquivo|clear]   define / limpa o system prompt a partir de um arquivo (ou usa o último anexo se sem argumento)
 
 {bold('Arquivos')}
   /attach <caminho>        anexa um arquivo de texto à próxima mensagem
@@ -1071,10 +1014,6 @@ def handle_command(line):
         for k, v in c_.items():
             print(f"  {k:12} {v}")
         print(dim(f"  estado em    {STATE_FILE}"))
-    elif cmd == "think":
-        S["config"]["think_aloud"] = not cfg("think_aloud")
-        save_state()
-        print(amber("Think-aloud LIGADO — o modelo mostrará pensamentos entre ((...)).") if cfg("think_aloud") else green("Think-aloud desligado."))
     elif cmd == "attach":
         path = os.path.expanduser(arg.strip('"\''))
         try:
@@ -1083,32 +1022,6 @@ def handle_command(line):
             print(green(f"Anexado: {os.path.basename(path)} ({len(ATTACH)} pendente(s))"))
         except OSError as e:
             print(red(f"Não consegui ler: {e}"))
-    elif cmd == "sysprompt":
-        # define o system prompt a partir de arquivo ou do último anexo; /sysprompt clear limpa
-        if not arg:
-            if not ATTACH:
-                print(red("Uso: /sysprompt <caminho> | anexe um arquivo com /attach e rode /sysprompt sem argumento | /sysprompt clear"))
-            else:
-                a = ATTACH.pop(0)
-                S["config"]["system_prompt"] = a["content"]
-                save_state()
-                print(green(f"System prompt definido a partir do anexo: {a['name']}"))
-        else:
-            aarg = arg.strip()
-            if aarg.lower() in ("clear", "off", "none"):
-                S["config"]["system_prompt"] = ""
-                save_state()
-                print(green("System prompt removido. Voltando ao prompt padrão."))
-            else:
-                path = os.path.expanduser(aarg.strip('"\''))
-                try:
-                    with open(path, encoding="utf-8", errors="replace") as f:
-                        data = f.read()
-                    S["config"]["system_prompt"] = data
-                    save_state()
-                    print(green(f"System prompt definido a partir de: {path}"))
-                except OSError as e:
-                    print(red(f"Não consegui ler o ficheiro: {e}"))
     elif cmd == "export":
         path = arg or "mini-quark-backup.json"
         data = {k: S[k] for k in ("v", "chats", "activeChatId", "graph")}
@@ -1143,10 +1056,17 @@ def handle_command(line):
 
 
 # ───────────────────────────── main ─────────────────────────────
+def rl_prompt(s):
+    """Marca os códigos ANSI do prompt (\\001..\\002) para o readline calcular a largura certa."""
+    if "readline" not in sys.modules:
+        return s
+    return re.sub(r"(\x1b\[[0-9;]*m)", "\001\\1\002", s)
+
+
 def read_input(prompt):
     lines = []
     while True:
-        line = input(prompt if not lines else dim("… "))
+        line = input(rl_prompt(prompt if not lines else dim("… ")))
         if line.endswith("\\"):
             lines.append(line[:-1])
             continue
@@ -1194,8 +1114,6 @@ def main():
         print(amber("  Sem API key. Use /key ou exporte OPENROUTER_API_KEY."))
     if cfg("auto"):
         print(amber("  ⚠ Execução automática de ferramentas está LIGADA (/auto para desligar)."))
-    if cfg("think_aloud"):
-        print(amber("  🧠 Think-aloud ativado: pensamentos serão mostrados entre ((...))."))
 
     while True:
         try:
