@@ -11,6 +11,7 @@ aleatório (gerado a cada execução) em toda chamada /api — outras páginas a
 navegador não conseguem mandar comandos para cá.
 """
 import argparse
+import base64
 import contextlib
 import json
 import os
@@ -20,23 +21,58 @@ import time
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import mini_quark_cli as mq
+
+try:   # ferramenta de navegador (opcional): precisa de mini_quark_browser.py ao lado
+    import mini_quark_browser as qb
+except Exception:
+    qb = None
+
+try:   # pesquisa na web + cliente MCP (Roblox Studio): precisa de mini_quark_tools.py ao lado
+    import mini_quark_tools as qt
+except Exception as _e:   # não esconde o motivo: sem isso as ferramentas novas somem sem aviso
+    qt = None
+    print(f"[aviso] mini_quark_tools.py não carregou ({type(_e).__name__}: {_e}) — pesquisa web e MCP indisponíveis.")
+
+if qt:   # evita que o modelo procure o servidor MCP pelo terminal
+    _sp = mq.system_prompt
+    mq.system_prompt = lambda: _sp() + (
+        "\n\nFerramentas MCP: para conectar ao Roblox Studio (ou qualquer servidor MCP) use SOMENTE a ferramenta "
+        "mcp_servidor com acao='conectar' — nunca procure o servidor pelo terminal. Depois de conectar, as ferramentas "
+        "roblox_studio__* aparecem na próxima rodada. Para buscar na internet use pesquisar_web e ler_url.")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN = secrets.token_urlsafe(24)
 LOCK = threading.Lock()          # uma resposta por vez
+SHOTS = os.path.join(mq.HOME, "shots")   # última captura do navegador de cada conversa
+TURN = {"cancel": False}         # cancelamento cooperativo do turno em andamento
 PENDING = {}                     # confirmações de ferramentas aguardando o usuário
-SAFE = {"lembrar", "consultar_teia"}   # ferramentas permitidas no modo "Chat"
+SAFE = {"lembrar", "consultar_teia", "pesquisar_web", "ler_url"}   # permitidas no modo "Chat" (MCP/terminal só no Work)
 ALL_TOOLS = mq.all_tools
 mq.USE_COLOR = False
+
+
+def valid_traces(ch):
+    """Raciocínio/passos salvos por turno (chave = índice da mensagem do usuário); ignora os que não batem mais com o histórico."""
+    out = {}
+    for k, t in (ch.get("traces") or {}).items():
+        i = int(k)
+        if i < len(ch["history"]) and ch["history"][i]["role"] == "user" and ch["history"][i]["content"][:80] == t.get("u"):
+            out[k] = t["items"]
+    return out
 
 
 def state():
     ch = mq.active_chat()
     return {"chats": [{"id": c["id"], "title": c["title"]} for c in reversed(mq.S["chats"])],
-            "active": ch["id"], "model": mq.cfg("model"), "hasKey": bool(mq.api_key()),
-            "history": [m for m in ch["history"] if m["role"] in ("user", "assistant")]}
+            "active": ch["id"], "model": mq.cfg("model"), "hasKey": bool(mq.api_key()), "provider": mq.provider(), "browser": qb is not None,
+            "providers": {k: {"nome": v["nome"], "model": mq.saved_model(k) if k != mq.provider() else mq.cfg("model"),
+                              "key": mq.key_status(k), "url": v["url"]} for k, v in mq.PROVIDERS.items()},
+            "baseUrl": mq.cfg("baseUrl"), "mcp": qt.mcp_status() if qt else [],
+            "history": [m for m in ch["history"] if m["role"] in ("user", "assistant")],
+            "traces": valid_traces(ch)}
 
 
 class Sink:
@@ -78,6 +114,19 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b)
         elif self.path == "/api/state":
             self._json(state())
+        elif self.path == "/api/mcp":
+            self._json({"mcp": qt.mcp_status() if qt else []})
+        elif self.path.startswith("/api/browser"):
+            cid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+            ch = next((c for c in mq.S["chats"] if c["id"] == cid), None)
+            img = None
+            if ch:
+                try:
+                    with open(os.path.join(SHOTS, ch["id"] + ".jpg"), "rb") as f:
+                        img = base64.b64encode(f.read()).decode()
+                except OSError:
+                    pass
+            self._json({"b": (ch or {}).get("browser") or {}, "img": img})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -100,10 +149,43 @@ class H(BaseHTTPRequestHandler):
             if not any(c["id"] == S["activeChatId"] for c in S["chats"]):
                 S["activeChatId"] = S["chats"][-1]["id"]
         elif route == "config":
+            if d.get("provider") in mq.PROVIDERS and d["provider"] != mq.provider():
+                mq.set_provider(d["provider"])
+            if d.get("baseUrl") is not None and mq.provider() == "custom":
+                S["config"]["baseUrl"] = d["baseUrl"].strip()
             if d.get("model"):
                 S["config"]["model"] = d["model"].strip()
             if d.get("key"):
-                S["config"]["apiKey"] = d["key"].strip()
+                mq.set_key(d["key"].strip())
+        elif route == "cancel":
+            TURN["cancel"] = True
+            for p in list(PENDING.values()):          # destrava confirmações pendentes (negadas)
+                p["ok"] = False
+                p["ev"].set()
+            try:                                      # destrava a leitura bloqueada da resposta do modelo
+                r = mq.ACTIVE.get("res")
+                r and r.close()
+            except Exception:
+                pass
+            return self._json({"ok": True})
+        elif route == "browser/close":
+            if qb:
+                qb.close()
+            return self._json({"ok": True})
+        elif route in ("mcp/connect", "mcp/disconnect"):
+            if not qt:
+                return self._json({"error": "mini_quark_tools.py não encontrado"}, 500)
+            nome, err = d.get("nome") or "Roblox_Studio", None
+            if LOCK.locked():          # evita mexer nas ferramentas no meio de uma resposta
+                return self._json({"error": "Aguarde a resposta atual terminar."}, 409)
+            try:
+                if route == "mcp/connect":
+                    qt.mcp_connect(nome, ask=False)   # o clique do usuário já é a confirmação
+                else:
+                    qt.mcp_disconnect(nome)
+            except Exception as e:
+                err = str(e)
+            return self._json({"mcp": qt.mcp_status(), "error": err})
         elif route == "confirm":
             p = PENDING.get(d.get("id"))
             if p:
@@ -129,9 +211,16 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except OSError:          # navegador fechou/abortou: interrompe o turno
                 raise KeyboardInterrupt
+            if TURN["cancel"]:       # botão Parar: idem
+                raise KeyboardInterrupt
 
-        if not LOCK.acquire(blocking=False):
-            return emit("error", "Já existe uma resposta em andamento.")
+        # Depois de um Parar, o turno antigo pode levar alguns segundos para encerrar: espera por ele.
+        got = LOCK.acquire(timeout=8) if TURN["cancel"] else LOCK.acquire(blocking=False)
+        if not got:
+            return emit("error", "A resposta anterior ainda está sendo encerrada. Tente de novo em instantes."
+                        if TURN["cancel"] else "Já existe uma resposta em andamento.")
+        TURN["cancel"] = False
+        mq.should_stop = lambda: TURN["cancel"]
         try:
             ch = next((c for c in mq.S["chats"] if c["id"] == d.get("chat")), None)
             text = (d.get("text") or "").strip()
@@ -143,11 +232,70 @@ class H(BaseHTTPRequestHandler):
             mq.S["config"]["effort"] = "medium" if d.get("think") else "auto"
             work = d.get("mode") == "work"
             mq.all_tools = ALL_TOOLS if work else (lambda: [t for t in ALL_TOOLS() if t["function"]["name"] in SAFE])
-            mq.STREAM = {"start": lambda: emit("seg"), "token": lambda t: emit("text", t), "end": lambda: None,
-                         "think_start": lambda: emit("think_start"), "think_token": lambda t: emit("think", t),
-                         "think_end": lambda s: emit("think_end", s)}
-            mq.show_step = lambda title, detail="": emit("step", title + (": " + str(detail).strip().splitlines()[0][:120]
-                                                                             if str(detail).strip() else ""))
+            # Grava o que acontece no turno (raciocínio, trechos, passos) para reconstruir após recarregar a página.
+            base, trace, cur = len(ch["history"]), [], {"seg": None, "think": None}
+
+            def rec(kind, **kw):
+                trace.append({"k": kind, **kw})
+                return trace[-1]
+
+            def h_start():
+                cur["seg"] = rec("seg", text="")
+                emit("seg")
+
+            def h_token(t):
+                cur["seg"] = cur["seg"] or rec("seg", text="")
+                cur["seg"]["text"] += t
+                emit("text", t)
+
+            def h_tstart():
+                cur["think"] = rec("think", text="", secs=None)
+                emit("think_start")
+
+            def h_ttoken(t):
+                cur["think"] = cur["think"] or rec("think", text="", secs=None)
+                cur["think"]["text"] += t
+                emit("think", t)
+
+            def h_tend(s):
+                if cur["think"]:
+                    cur["think"]["secs"] = s
+                cur["think"] = None
+                emit("think_end", s)
+
+            def step(title, detail=""):
+                d = str(detail).strip()
+                msg = title + (": " + d.splitlines()[0][:120] if d else "")
+                cur["seg"] = None
+                rec("step", text=msg)
+                emit("step", msg)
+
+            def brec(p):   # estado do painel do navegador, por conversa
+                b, k = ch.setdefault("browser", {}), p.get("k")
+                if k == "shot":
+                    b.update({x: p[x] for x in ("url", "title", "x", "y", "w", "h")})
+                    try:
+                        os.makedirs(SHOTS, exist_ok=True)
+                        with open(os.path.join(SHOTS, ch["id"] + ".jpg"), "wb") as f:
+                            f.write(base64.b64decode(p["img"]))
+                    except OSError:
+                        pass
+                elif k == "dom":
+                    b["dom"] = p["text"]
+                elif k == "act":
+                    if p["name"] == "abrir":
+                        b["con"] = []
+                    b.setdefault("hist", []).append({"name": p["name"], "args": p["args"], "result": None})
+                    del b["hist"][:-100]
+                elif k == "res" and b.get("hist"):
+                    b["hist"][-1]["result"] = p["result"]
+                elif k == "con":
+                    b.setdefault("con", []).append({"nivel": p["nivel"], "text": p["text"]})
+                    del b["con"][:-200]
+
+            mq.STREAM = {"start": h_start, "token": h_token, "end": lambda: None,
+                         "think_start": h_tstart, "think_token": h_ttoken, "think_end": h_tend}
+            mq.show_step = step
 
             def ask(kind, detail):
                 if mq.AUTO or mq.cfg("auto"):
@@ -160,12 +308,30 @@ class H(BaseHTTPRequestHandler):
                 return p["ok"]
 
             mq.confirm = ask
+            if qt:   # construir algo no Studio exige várias rodadas de ferramenta
+                mq.MAX_TOOL_ROUNDS = max(mq.MAX_TOOL_ROUNDS, qt.MAX_ROUNDS)
+            if qb:   # navegador: eventos ao vivo para o painel + mais rodadas de ferramenta para o ciclo observar→agir
+                qb.set_sink(lambda p: (brec(p), emit("browser", None, **p)))
+                qb.reset_budget()
+                mq.MAX_TOOL_ROUNDS = max(mq.MAX_TOOL_ROUNDS, qb.MAX_STEPS)
             try:
-                with contextlib.redirect_stdout(Sink(emit)):
+                with contextlib.redirect_stdout(Sink(lambda t, v: (rec("log", text=v), emit(t, v)))):
                     mq.chat_turn(text)
                 emit("done")
             except KeyboardInterrupt:
                 pass
+            except Exception as e:   # ex.: leitura fechada pelo Parar, queda de rede
+                if not TURN["cancel"]:
+                    try:
+                        emit("error", f"Falha: {e}")
+                    except KeyboardInterrupt:
+                        pass
+            finally:
+                if trace:
+                    ch.setdefault("traces", {})[str(base)] = {"u": text[:80], "items": trace}
+                mq.save_state()
+                if qb:
+                    qb.set_sink(None)
         finally:
             LOCK.release()
 
@@ -181,6 +347,7 @@ def main():
     url = f"http://127.0.0.1:{a.port}"
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
     print(f"mini-quark web em {url}  (Ctrl+C para sair)")
+    print(f"  ferramentas web/MCP V0.2: {'ativas' if qt else 'INATIVAS'}")
     if not a.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:

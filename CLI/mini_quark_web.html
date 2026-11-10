@@ -82,10 +82,33 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;position:relative}
 dialog{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:16px;padding:20px;width:min(420px,92vw)}
 dialog::backdrop{background:#0008}
 dialog label{display:block;margin:12px 0 4px;color:var(--mut);font-size:13px}
-dialog input{width:100%;background:var(--pill);border:1px solid var(--line);color:var(--txt);border-radius:10px;padding:8px 12px}
+dialog input,dialog select{width:100%;background:var(--pill);border:1px solid var(--line);color:var(--txt);border-radius:10px;padding:8px 12px}
 dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 dialog .row button{border:1px solid var(--line);border-radius:999px;padding:6px 16px}
 @media(max-width:640px){.rail{width:44px}.seg button{padding:6px 16px}.side.open{position:absolute;z-index:5;height:100%;left:44px}}
+.br{width:0;overflow:hidden;border-left:1px solid var(--line);background:var(--rail);transition:width .2s;display:flex;flex-direction:column}
+.br.open{width:min(46vw,640px)}
+.br>*{min-width:min(46vw,640px)}
+.bh{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.bh b{flex:1;font-weight:500}
+.bh button{border:1px solid var(--line);border-radius:999px;padding:3px 12px;font-size:13px}
+.bs{display:flex;flex-direction:column;min-height:0;border-bottom:1px solid var(--line)}
+.bs h4{margin:0;padding:6px 12px;font-size:12px;font-weight:500;color:var(--mut)}
+.sc{flex:1;overflow:auto;min-height:0;margin:0}
+.s1{flex:3}.s2{flex:2}.s3{flex:2}
+.url{padding:0 12px 6px;color:var(--mut);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vis{position:relative;margin:0 12px 10px;line-height:0;background:#000;border-radius:8px;overflow:hidden;width:fit-content;max-width:calc(100% - 24px)}
+.vis img{max-width:100%;display:block}
+#cur{position:absolute;width:18px;height:18px;pointer-events:none;display:none;transition:left .45s ease,top .45s ease}
+#cur svg{width:18px;height:18px;fill:#fff;stroke:#000;stroke-width:1.5}
+.dot{position:absolute;width:24px;height:24px;margin:-12px 0 0 -12px;border-radius:50%;border:2px solid #ff4d4d;background:#ff4d4d44;pointer-events:none;animation:fade 2.5s forwards}
+@keyframes fade{to{opacity:0;transform:scale(1.6)}}
+.dom{padding:6px 12px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;color:var(--mut)}
+.hist{padding:4px 12px;font-size:13px}
+.hist div{padding:5px 0;border-bottom:1px solid var(--line)}
+.con div{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;word-break:break-word}
+.hist small{display:block;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:72px;overflow:hidden}
+@media(max-width:900px){.br.open{position:absolute;right:0;top:0;bottom:0;z-index:6;width:92vw}}
 </style>
 </head>
 <body class="empty">
@@ -94,12 +117,13 @@ dialog .row button{border:1px solid var(--line);border-radius:999px;padding:6px 
   <button id="bNew" title="Nova conversa" aria-label="Nova conversa" data-i="pen"></button>
   <button id="bSearch" title="Buscar conversas" aria-label="Buscar conversas" data-i="search"></button>
   <button id="bChats" title="Conversas" aria-label="Conversas" data-i="chat"></button>
+  <button id="bBr" title="Navegador do agente" aria-label="Navegador do agente" data-i="globe"></button>
   <div class="sp"></div>
   <button id="bSet" title="Configurações" aria-label="Configurações" data-i="sliders"></button>
 </nav>
 <aside class="side" id="side"><div><input id="q" placeholder="Buscar conversas"><div class="chats" id="chats"></div></div></aside>
 <main>
-  <div class="seg" title="Chat: só memória. Work: terminal, código e ferramentas (pede confirmação)."><button id="mChat" class="on">Chat</button><button id="mWork">✦ Work</button></div>
+  <div class="seg" title="Chat: memória e pesquisa na web. Work: terminal, código, navegador e MCP (pede confirmação)."><button id="mChat" class="on">Chat</button><button id="mWork">✦ Work</button></div>
   <div id="log"><div class="col" id="msgs"></div></div>
   <div class="dock">
     <div class="greet">O que você tem em mente hoje?</div>
@@ -114,15 +138,27 @@ dialog .row button{border:1px solid var(--line);border-radius:999px;padding:6px 
   </div>
   <input type="file" id="file" multiple hidden>
 </main>
+<aside class="br" id="br" aria-label="Navegador do agente">
+  <div class="bh"><b>Navegador</b><button id="brStop" title="Interrompe o agente">Parar</button><button id="brClose">Fechar navegador</button></div>
+  <section class="bs s1"><h4>Visão / Ação</h4><div class="url" id="brUrl">Nenhuma página aberta (use o modo Work)</div>
+    <div class="sc"><div class="vis" id="vis" hidden><img id="shot" alt="Captura atual do navegador"><div id="cur"></div></div></div></section>
+  <section class="bs s2"><h4>HTML / DOM</h4><pre class="sc dom" id="dom"></pre></section>
+  <section class="bs s3"><h4>Histórico de ações</h4><div class="sc hist" id="hist"></div></section>
+  <section class="bs s3"><h4>Console do navegador</h4><div class="sc hist con" id="con"></div></section>
+</aside>
 <dialog id="dlg">
   <strong>Configurações</strong>
-  <label for="model">Modelo (OpenRouter)</label><input id="model" autocomplete="off">
-  <label for="key">Chave da API <span id="keyOk"></span></label><input id="key" type="password" autocomplete="off" placeholder="sk-or-...">
+  <label for="prov">Provedor</label><select id="prov"></select>
+  <div id="urlRow" hidden><label for="burl">URL base (compatível com OpenAI)</label><input id="burl" autocomplete="off" placeholder="http://localhost:1234/v1"></div>
+  <label for="model">Modelo</label><input id="model" autocomplete="off">
+  <label for="key">Chave da API <span id="keyOk"></span></label><input id="key" type="password" autocomplete="off" placeholder="cole a chave do provedor">
+  <label>Roblox Studio (MCP) <span id="mcpSt"></span></label>
+  <div class="row" style="margin-top:4px;justify-content:flex-start"><button id="mcpBtn">Conectar</button><small id="mcpErr" style="color:var(--mut);align-self:center"></small></div>
   <div class="row"><button id="dCancel">Cancelar</button><button id="dSave" style="background:var(--txt);color:var(--bg)">Salvar</button></div>
 </dialog>
 <script>
 const TOKEN="__TOKEN__",$=s=>document.querySelector(s);
-const P={pen:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',search:'<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',chat:'<path d="M21 12a8 8 0 01-11.6 7.1L3 21l1.9-5.4A8 8 0 1121 12z"/>',sliders:'<path d="M4 6h8M18 6h2M4 12h2M12 12h8M4 18h10M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',plus:'<path d="M12 5v14M5 12h14"/>',up:'<path d="M12 19V5M5 12l7-7 7 7"/>',stop:'<rect x="7" y="7" width="10" height="10" rx="2"/>',chev:'<path d="M6 9l6 6 6-6"/>',half:'<circle cx="12" cy="12" r="9"/><path d="M12 3v18"/>',trash:'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',term:'<path d="M4 17l6-6-6-6M12 19h8"/>',graph:'<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="10" cy="18" r="2.5"/><path d="M8 7l8 1M7 8l2 8M17 10l-6 6"/>',atom:'<circle cx="12" cy="12" r="1.8"/><ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/>'};
+const P={globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>',pen:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',search:'<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',chat:'<path d="M21 12a8 8 0 01-11.6 7.1L3 21l1.9-5.4A8 8 0 1121 12z"/>',sliders:'<path d="M4 6h8M18 6h2M4 12h2M12 12h8M4 18h10M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',plus:'<path d="M12 5v14M5 12h14"/>',up:'<path d="M12 19V5M5 12l7-7 7 7"/>',stop:'<rect x="7" y="7" width="10" height="10" rx="2"/>',chev:'<path d="M6 9l6 6 6-6"/>',half:'<circle cx="12" cy="12" r="9"/><path d="M12 3v18"/>',trash:'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',term:'<path d="M4 17l6-6-6-6M12 19h8"/>',graph:'<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="10" cy="18" r="2.5"/><path d="M8 7l8 1M7 8l2 8M17 10l-6 6"/>',atom:'<circle cx="12" cy="12" r="1.8"/><ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/>'};
 const ico=n=>`<svg viewBox="0 0 24 24" aria-hidden="true">${P[n]}</svg>`;
 document.querySelectorAll("[data-i]").forEach(e=>e.insertAdjacentHTML("afterbegin",ico(e.dataset.i)));
 const H={"X-Token":TOKEN,"Content-Type":"application/json"};
@@ -135,7 +171,12 @@ const msgs=$("#msgs"),log=$("#log"),ta=$("#in");
 function setEmpty(){document.body.classList.toggle("empty",!msgs.children.length)}
 function addUser(t){const d=document.createElement("div");d.className="u";d.append(document.createElement("div"));d.firstChild.textContent=t;msgs.append(d)}
 function addAsst(t){const d=document.createElement("div");d.className="a";if(t!=null){const m=document.createElement("div");m.className="md";m.innerHTML=md(t);d.append(m)}msgs.append(d);return d}
-function load(s){S=s;msgs.innerHTML="";s.history.forEach(m=>m.role==="user"?addUser(m.content):addAsst(m.content));setEmpty();renderChats();log.scrollTop=log.scrollHeight}
+function load(s){S=s;msgs.innerHTML="";const tr=s.traces||{};
+  for(let i=0;i<s.history.length;i++){const m=s.history[i];
+    if(m.role==="user"){addUser(m.content);const t=tr[i];
+      if(t){renderTrace(addAsst(),t);const n=s.history[i+1];if(n&&n.role==="assistant"&&t.some(x=>x.k==="seg"&&x.text.trim()))i++}}
+    else addAsst(m.content)}
+  setEmpty();renderChats();log.scrollTop=log.scrollHeight;loadBrowser()}
 function renderChats(){
   const f=$("#q").value.toLowerCase(),box=$("#chats");box.innerHTML="";
   S.chats.filter(c=>c.title.toLowerCase().includes(f)).forEach(c=>{
@@ -154,8 +195,9 @@ function mkThink(a){const d=document.createElement("div");d.className="th open l
   d.querySelector(".th-h").onclick=()=>d.classList.toggle("open");a.append(d);return d}
 function noteEl(a,cls,t){const d=document.createElement("div");d.className=cls;d.textContent=t;a.append(d)}
 
+const stop=()=>{api("cancel",{});ctl&&ctl.abort()};
 async function send(){
-  if(busy){ctl&&ctl.abort();return}
+  if(busy){stop();return}
   const text=ta.value.trim();if(!text&&!atts.length)return;
   let full=text;atts.forEach(a=>full+=`\n\n--- [Arquivo: ${a.name}] ---\n${a.text}`);
   ta.value="";grow();atts=[];renderAtts();
@@ -179,7 +221,8 @@ async function send(){
     case"step":seg=null;noteEl(a,"step","⚙ "+m.d);break;
     case"confirm":seg=null;confirmCard(a,m);break;
     case"log":noteEl(a,/erro|⚠|falh/i.test(m.d)?"err":"step",m.d);break;
-    case"error":noteEl(a,"err",m.d);break}
+    case"error":noteEl(a,"err",m.d);break;
+    case"browser":brHandle(m);break}
     sched()};
   try{
     const r=await fetch("/api/send",{method:"POST",signal:ctl.signal,headers:H,body:JSON.stringify({chat:S.active,text:full,mode:work?"work":"chat",think})});
@@ -210,11 +253,53 @@ $("#q").oninput=renderChats;
 $("#bAtt").onclick=()=>$("#file").click();
 $("#file").onchange=async e=>{for(const f of e.target.files)atts.push({name:f.name,text:await f.text()});e.target.value="";renderAtts()};
 const dlg=$("#dlg");
-$("#bSet").onclick=()=>{$("#model").value=S.model||"";$("#key").value="";$("#keyOk").textContent=S.hasKey?"(definida ✓)":"(não definida)";dlg.showModal()};
+const fillProv=()=>{const p=$("#prov").value,i=(S.providers||{})[p]||{};$("#model").value=i.model||"";$("#key").value="";$("#keyOk").textContent=i.key?i.key:"";$("#urlRow").hidden=p!=="custom";if(p==="custom")$("#burl").value=S.baseUrl||""};
+$("#prov").onchange=fillProv;
+$("#bSet").onclick=()=>{const sel=$("#prov");sel.innerHTML="";for(const[k,v]of Object.entries(S.providers||{}))sel.add(new Option(v.nome,k));sel.value=S.provider||"openrouter";fillProv();mcpRender({mcp:S.mcp});api("mcp").then(r=>{S.mcp=r.mcp;mcpRender(r)}).catch(()=>{});dlg.showModal()};
+const mcpRender=r=>{const s=(r.mcp||[]).find(x=>x.nome==="Roblox_Studio"),b=$("#mcpBtn");$("#mcpSt").textContent=s?(s.conectado?"(conectado · "+s.ferramentas+" ferramentas)":"(desconectado)"):"(indisponível neste sistema)";b.disabled=!s;b.textContent=s&&s.conectado?"Desconectar":"Conectar";b.dataset.on=s&&s.conectado?"1":"";$("#mcpErr").textContent=r.error||(s&&!s.conectado?"Ative o servidor MCP no Studio antes (Assistente ▸ ⋯ ▸ Gerenciar Servidores MCP)":"")};
+$("#mcpBtn").onclick=async()=>{const b=$("#mcpBtn");b.disabled=true;b.textContent="…";try{mcpRender(await api("mcp/"+(b.dataset.on?"disconnect":"connect"),{nome:"Roblox_Studio"}))}catch(e){mcpRender({mcp:S.mcp,error:String(e)})}};
 $("#dCancel").onclick=()=>dlg.close();
-$("#dSave").onclick=async()=>{S=await api("config",{model:$("#model").value,key:$("#key").value});dlg.close()};
+$("#dSave").onclick=async()=>{S=await api("config",{provider:$("#prov").value,model:$("#model").value,key:$("#key").value,baseUrl:$("#burl").value});dlg.close()};
 [["pen","Escreva ou edite",()=>{ta.value="Escreva ";}],["term","Execute um comando",()=>{setWork(true);ta.value="Execute o comando: "}],["graph","Consulte a memória",()=>{ta.value="O que você tem guardado na sua memória sobre mim?"}]].forEach(([i,t,f])=>{
   const b=document.createElement("button");b.innerHTML=ico(i)+"<span>"+t+"</span>";b.onclick=()=>{f();grow();ta.focus()};$("#sugg").append(b)});
+/* Painel do navegador: o conteúdo do site chega só como imagem JPEG e texto puro (textContent), nunca como HTML. */
+let lastAct=null;
+$("#cur").innerHTML='<svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-2 6z"/></svg>';
+function brHandle(m){
+  $("#br").classList.add("open");
+  if(m.k==="shot"){
+    $("#vis").hidden=false;$("#shot").src="data:image/jpeg;base64,"+m.img;
+    $("#brUrl").textContent=(m.title?m.title+" — ":"")+m.url;
+    const c=$("#cur"),l=(m.x/m.w*100)+"%",t=(m.y/m.h*100)+"%";c.style.display="block";c.style.left=l;c.style.top=t;
+    if(m.click){const d=document.createElement("i");d.className="dot";d.style.left=l;d.style.top=t;$("#vis").append(d);setTimeout(()=>d.remove(),2600)}
+  }else if(m.k==="dom"){$("#dom").textContent=m.text}
+  else if(m.k==="con"){const c=$("#con"),d=document.createElement("div");d.textContent="["+m.nivel+"] "+m.text;
+    if(/error|http|failed/.test(m.nivel))d.style.color="#e5736b";else if(m.nivel==="warning")d.style.color="#d9a441";
+    c.append(d);while(c.children.length>200)c.firstChild.remove();c.scrollTop=1e9}
+  else if(m.k==="act"){if(m.name==="abrir")$("#con").innerHTML="";const d=document.createElement("div"),b=document.createElement("b"),s=document.createElement("small");
+    b.textContent=m.name+" "+m.args;s.textContent="executando…";d.append(b,s);$("#hist").append(d);lastAct=s;$("#hist").scrollTop=1e9}
+  else if(m.k==="res"&&lastAct){lastAct.textContent=m.result}
+}
+/* Restaura raciocínio/passos de turnos anteriores e o painel do navegador da conversa (dados salvos no servidor). */
+function thUpd(th,text){const L=text.split("\n").map(s=>s.replace(/\*\*/g,"").trim()).filter(Boolean);
+  th.querySelector(".th-h span").textContent=(L[L.length-1]||"Pensou").slice(0,110);
+  th.querySelector(".th-b div").innerHTML=L.map(l=>`<p>${esc(l)}</p>`).join("")}
+function renderTrace(a,items){items.forEach(x=>{
+  if(x.k==="think"){const th=mkThink(a);th.classList.remove("live","open");thUpd(th,x.text);th.querySelector("small").textContent="Pensou por "+(x.secs==null?"?":x.secs)+"s"}
+  else if(x.k==="seg"){if(x.text.trim()){const d=document.createElement("div");d.className="md";d.innerHTML=md(x.text);a.append(d)}}
+  else noteEl(a,x.k==="log"&&/erro|⚠|falh/i.test(x.text)?"err":"step",x.text)})}
+function brReset(){$("#vis").hidden=true;$("#vis").querySelectorAll(".dot").forEach(d=>d.remove());$("#cur").style.display="none";
+  $("#brUrl").textContent="Nenhuma página aberta (use o modo Work)";$("#dom").textContent="";$("#hist").innerHTML="";$("#con").innerHTML="";lastAct=null;$("#br").classList.remove("open")}
+async function loadBrowser(){brReset();if(!S.active)return;
+  const r=await api("browser?id="+encodeURIComponent(S.active)),b=r.b||{};
+  if(!b.url&&!(b.hist||[]).length)return;
+  if(r.img)brHandle({k:"shot",img:r.img,w:b.w,h:b.h,x:b.x,y:b.y,click:false,url:b.url,title:b.title});else $("#br").classList.add("open");
+  if(b.dom)$("#dom").textContent=b.dom;
+  (b.hist||[]).forEach(h=>{brHandle({k:"act",name:h.name,args:h.args});if(h.result!=null)brHandle({k:"res",result:h.result})});
+  (b.con||[]).forEach(c=>brHandle({k:"con",nivel:c.nivel,text:c.text}))}
+$("#bBr").onclick=()=>$("#br").classList.toggle("open");
+$("#brStop").onclick=()=>busy&&stop();
+$("#brClose").onclick=()=>api("browser/close",{});
 api("state").then(s=>{load(s);if(!s.hasKey)$("#bSet").click();ta.focus()});
 </script>
 </body>

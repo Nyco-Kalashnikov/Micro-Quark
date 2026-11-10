@@ -6,6 +6,7 @@ Só usa a biblioteca padrão do Python 3.8+. Um arquivo, zero dependências.
 
 Uso:
     export OPENROUTER_API_KEY=sk-or-...     # ou use /key dentro do programa
+    # outros provedores: /provider openai|google|kilo|llm7|groq|mistral|deepseek|ollama|custom
     python mini_quark_cli.py                # modo interativo
     python mini_quark_cli.py -p "oi"        # one-shot (imprime a resposta e sai)
     python mini_quark_cli.py --yes          # executa ferramentas sem pedir confirmação
@@ -59,7 +60,29 @@ def blue(s):  return c("38;5;111", s)
 HOME = os.environ.get("MQ_HOME") or os.path.join(os.path.expanduser("~"), ".mini_quark")
 STATE_FILE = os.path.join(HOME, "state.json")
 OUT_DIR = os.path.join(os.getcwd(), "mq_output")
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
+API_URL = "https://openrouter.ai/api/v1/chat/completions"   # (legado; o endpoint real vem de api_url())
+
+# Provedores com API compatível com OpenAI (/chat/completions). "nokey": valor enviado quando a chave é opcional.
+PROVIDERS = {
+    "openrouter": {"nome": "OpenRouter", "url": "https://openrouter.ai/api/v1", "env": ["OPENROUTER_API_KEY"],
+                   "model": "cohere/north-mini-code:free", "reasoning": True},
+    "openai":     {"nome": "OpenAI", "url": "https://api.openai.com/v1", "env": ["OPENAI_API_KEY"], "model": "gpt-4o-mini"},
+    "google":     {"nome": "Google Gemini", "url": "https://generativelanguage.googleapis.com/v1beta/openai",
+                   "env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"], "model": "gemini-2.5-flash"},
+    "kilo":       {"nome": "Kilo Gateway", "url": "https://api.kilo.ai/api/gateway", "env": ["KILO_API_KEY"],
+                   "model": "kilo-auto/free", "nokey": "anonymous", "anon": True},   # modelos grátis funcionam sem chave
+    "llm7":       {"nome": "LLM7.io", "url": "https://api.llm7.io/v1", "env": ["LLM7_API_KEY"], "model": "default",
+                   "nokey": "unused"},
+    "groq":       {"nome": "Groq", "url": "https://api.groq.com/openai/v1", "env": ["GROQ_API_KEY"],
+                   "model": "llama-3.3-70b-versatile"},
+    "mistral":    {"nome": "Mistral", "url": "https://api.mistral.ai/v1", "env": ["MISTRAL_API_KEY"],
+                   "model": "mistral-small-latest"},
+    "deepseek":   {"nome": "DeepSeek", "url": "https://api.deepseek.com/v1", "env": ["DEEPSEEK_API_KEY"],
+                   "model": "deepseek-chat"},
+    "ollama":     {"nome": "Ollama (local)", "url": "http://localhost:11434/v1", "env": [], "model": "llama3.1",
+                   "nokey": "ollama"},
+    "custom":     {"nome": "Personalizado", "url": "", "env": ["MQ_API_KEY"], "model": "", "nokey": "unused"},
+}
 MAX_TOOL_ROUNDS = 8
 
 
@@ -79,6 +102,7 @@ def default_state():
         "prompts": {},          # nome -> texto (system prompts customizados)
         "activePrompt": "",     # prompt global em uso ("" = padrão)
         "config": {"apiKey": "", "model": "cohere/north-mini-code:free", "extra": "",
+                   "provider": "openrouter", "keys": {}, "models": {}, "baseUrl": "",
                    "temperature": 0.7, "maxTokens": 4096, "auto": False,
                    "promptMode": "replace", "promptMemory": True,
                    "thinking": "summary", "effort": "auto"},
@@ -122,8 +146,56 @@ def cfg(k):
     return S["config"][k]
 
 
-def api_key():
-    return os.environ.get("OPENROUTER_API_KEY") or cfg("apiKey")
+def provider():
+    p = S["config"].get("provider")
+    return p if p in PROVIDERS else "openrouter"
+
+
+def prov():
+    return PROVIDERS[provider()]
+
+
+def api_url():
+    base = ((cfg("baseUrl") if provider() == "custom" else prov()["url"]) or "").strip().rstrip("/")
+    return base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+
+def api_key(p=None):
+    """Chave do provedor: variável de ambiente > chave salva > valor padrão do provedor (se a chave for opcional)."""
+    p = p or provider()
+    for e in PROVIDERS[p]["env"]:
+        if os.environ.get(e):
+            return os.environ[e]
+    k = (S["config"].get("keys") or {}).get(p) or (S["config"].get("apiKey") if p == "openrouter" else "")
+    return k or PROVIDERS[p].get("nokey", "")
+
+
+def key_status(p=None):
+    p = p or provider()
+    if any(os.environ.get(e) for e in PROVIDERS[p]["env"]):
+        return "(via env)"
+    k = (S["config"].get("keys") or {}).get(p) or (S["config"].get("apiKey") if p == "openrouter" else "")
+    return ("…" + k[-4:]) if k else ("(opcional)" if "nokey" in PROVIDERS[p] else "(não definida)")
+
+
+def set_key(k):
+    S["config"].setdefault("keys", {})[provider()] = k
+    if provider() == "openrouter":
+        S["config"]["apiKey"] = k      # compatível com backups antigos
+
+
+def saved_model(p):
+    return (S["config"].get("models") or {}).get(p) or PROVIDERS[p]["model"]
+
+
+def set_provider(name):
+    """Troca de provedor lembrando o modelo usado em cada um."""
+    if name not in PROVIDERS:
+        raise KeyError(name)
+    c = S["config"]
+    c.setdefault("models", {})[provider()] = c["model"]
+    c["provider"] = name
+    c["model"] = saved_model(name)
 
 
 def active_chat():
@@ -257,9 +329,17 @@ BASE_TOOLS = [
 ]
 
 
+EXTRA_TOOLS = {}   # nome -> (schema, função(args) -> str); módulos externos se registram aqui
+
+
+def register_tool(schema, fn):
+    """Registra uma ferramenta extra (ex.: mini_quark_browser.py) sem mexer em BASE_TOOLS/execute_tool."""
+    EXTRA_TOOLS[schema["function"]["name"]] = (schema, fn)
+
+
 def all_tools():
     custom = [tool_schema(t["nome"], t["descricao"], {"argumento": S_}, ["argumento"]) for _, t in S["tools"]]
-    return BASE_TOOLS + custom
+    return BASE_TOOLS + custom + [sc for sc, _ in EXTRA_TOOLS.values()]
 
 
 AUTO = False  # --yes ou /auto
@@ -319,8 +399,15 @@ def show_step(title, detail=""):
 
 
 def execute_tool(name, args):
+    if name not in {t["function"]["name"] for t in all_tools()}:
+        return (f"Erro: a ferramenta '{name}' não está disponível neste modo. "
+                "Diga ao usuário que ela só funciona no modo Work (terminal, código e navegador).")
+    if name in EXTRA_TOOLS:
+        return str(EXTRA_TOOLS[name][1](args))
     if name == "executar_terminal":
-        cmd = args.get("comando", "")
+        cmd = str(args.get("comando") or args.get("command") or "").strip()
+        if not cmd:
+            return "Erro: o argumento 'comando' está ausente ou vazio."
         if not confirm("executar comando no terminal", cmd):
             return "O usuário negou a execução do comando."
         show_step("Terminal Local", cmd)
@@ -328,6 +415,8 @@ def execute_tool(name, args):
 
     if name == "run_code":
         lang, code = args.get("language", ""), args.get("code", "")
+        if not str(code).strip():
+            return "Erro: o argumento 'code' está ausente ou vazio."
         if not confirm(f"executar código ({lang})", code):
             return "O usuário negou a execução do código."
         show_step("Executar Código Local", f"{lang}: {code}")
@@ -415,17 +504,19 @@ def execute_tool(name, args):
 
 
 # ───────────────────────────── API (OpenRouter, streaming) ─────────────────────────────
-DEFAULT_PERSONA = ('Você é o Mini-Quark, rodando 100% em um terminal. Você está conversando em: "{chat}".\n'
-                   "Seja direto e objetivo. Você pode executar comandos com 'executar_terminal' — o resultado "
-                   "(exit code, stdout, stderr) volta para você. Pode usar Markdown simples nas respostas.")
-MEMORY_RULES = ("Contexto Completo da Teia de Memória Persistente (estrutura hierárquica real, indentação = profundidade):\n"
-                "{memory}\n\n"
-                "Respeite fielmente os níveis de profundidade e não invente ligações. Use 'consultar_teia' para confirmar "
-                "hierarquia, filhos ou descendentes com certeza, e deixe claro ao usuário quando a resposta vem de consulta direta.")
+DEFAULT_PERSONA = ('You are Mini-Quark, running 100% within a terminal. You are chatting in: "{chat}".\n'
+"Be direct and to the point. {terminal_hint} Use only the tools available in this conversation; "
+"do not invent tools or arguments. You may use simple Markdown in your responses.")
+
+MEMORY_RULES = ("Full Context of the Persistent Memory Web (actual hierarchical structure, indentation = depth):\n"
+"{memory}\n\n"
+"Strictly adhere to the depth levels and do not invent connections. Use 'consult_web' to verify "
+"hierarchy, children, or descendants with certainty, and make it clear to the user when an answer is derived from a direct query.")
+
 PROMPT_VARS = {
-    "chat": "título da conversa atual", "date": "data e hora atuais", "cwd": "pasta de trabalho",
-    "os": "sistema operacional", "model": "modelo em uso", "memory": "a teia de memória (já formatada)",
-    "extra": "instruções globais definidas com /extra",
+    "chat": "current conversation title", "date": "data e hora atuais", "cwd": "pasta de trabalho",
+    "os": "operating system", "model": "modelo em uso", "memory": "a teia de memória (já formatada)",
+    "extra": "global instructions defined with /extra",
 }
 
 
@@ -445,7 +536,11 @@ def active_prompt():
 
 def fill_vars(text):
     vals = {"chat": active_chat()["title"], "date": time.strftime("%Y-%m-%d %H:%M"), "cwd": os.getcwd(),
-            "os": platform.platform(), "model": cfg("model"), "memory": memory_summary(), "extra": cfg("extra")}
+            "os": platform.platform(), "model": cfg("model"), "memory": memory_summary(), "extra": cfg("extra"),
+            "terminal_hint": ("Você pode executar comandos com 'executar_terminal' — o resultado (exit code, stdout, stderr) "
+                              "volta para você." if any(t["function"]["name"] == "executar_terminal" for t in all_tools())
+                              else "Neste modo você NÃO tem terminal, código nem navegador: se o usuário pedir algo assim, "
+                                   "diga que ele precisa trocar para o modo Work.")}
     return re.sub(r"\{(%s)\}" % "|".join(vals), lambda m: str(vals[m.group(1)]), text)
 
 
@@ -512,6 +607,12 @@ def _think_end(secs):
         print(dim(f"✻ pensou por {secs}s · ~{_T['words']} palavras  (/think last para ver)"))
 
 
+# Cancelamento (usado pelo servidor web): should_stop() é consultado antes de cada chamada à API e
+# ACTIVE["res"] guarda a resposta HTTP em andamento, para que quem cancelou possa fechá-la e
+# destravar uma leitura bloqueada.
+should_stop = lambda: False
+ACTIVE = {"res": None}
+
 STREAM = {"start": _stream_start, "token": _stream_token, "end": _stream_end,
           "think_start": _think_start, "think_token": _think_token, "think_end": _think_end}
 
@@ -552,27 +653,48 @@ class _ThinkSplitter:
 
 
 def call_api(messages, stream_out=True):
+    if should_stop():
+        raise KeyboardInterrupt
     payload_obj = {"model": cfg("model"), "messages": messages, "tools": all_tools(), "tool_choice": "auto",
                    "temperature": cfg("temperature"), "max_tokens": cfg("maxTokens"), "stream": True}
+    pv = prov()
     effort = cfg("effort")
-    if effort and effort != "auto":  # "auto" = não manda nada; o modelo decide
+    if effort and effort != "auto" and pv.get("reasoning"):  # "auto" = não manda nada; só a OpenRouter aceita este campo
         payload_obj["reasoning"] = {"effort": "none" if effort == "off" else effort}
+    if provider() == "openai" and re.match(r"(o\d|gpt-5)", str(cfg("model"))):   # modelos de raciocínio da OpenAI
+        payload_obj["max_completion_tokens"] = payload_obj.pop("max_tokens")
+        payload_obj.pop("temperature", None)
+    if provider() == "kilo" and str(payload_obj["model"]).startswith("kilo/kilo-auto/"):   # "kilo/" é o provedor, não parte do id
+        payload_obj["model"] = payload_obj["model"][len("kilo/"):]
     body = json.dumps(payload_obj).encode()
-    req = urllib.request.Request(API_URL, data=body, method="POST", headers={
-        "Authorization": f"Bearer {api_key()}", "Content-Type": "application/json",
-        "X-Title": "mini-quark-cli"})
+    headers = {"Content-Type": "application/json", "User-Agent": "mini-quark-cli"}
+    if not (pv.get("anon") and api_key() == pv.get("nokey")):   # sem chave: acesso anônimo (só modelos gratuitos)
+        headers["Authorization"] = f"Bearer {api_key()}"
+    if provider() == "openrouter":
+        headers["X-Title"] = "mini-quark-cli"
+    req = urllib.request.Request(api_url(), data=body, method="POST", headers=headers)
     try:
         res = urllib.request.urlopen(req, timeout=120)
     except urllib.error.HTTPError as e:
-        msg = f"Erro na API OpenRouter ({e.code})"
+        tag = f"{pv['nome']} · {payload_obj['model']}"
+        msg = f"Erro na API {tag} ({e.code})"
         try:
             j = json.loads(e.read().decode("utf-8", "replace"))
-            msg = j.get("error", {}).get("message", msg)
+            if isinstance(j, list):
+                j = j[0] if j else {}
+            err = j.get("error", j) if isinstance(j, dict) else {}
+            m = err.get("message") if isinstance(err, dict) else err
+            if m:
+                msg = f"{tag}: {m}"
         except Exception:
             pass
+        if e.code in (401, 403):
+            msg += f"  → confira a chave de {pv['nome']} (/key) ou o provedor (/provider)."
+        if e.code == 402 or "credit" in msg.lower():
+            msg += f"  → este modelo é pago em {pv['nome']}; confira se o provedor/modelo estão corretos (/provider)."
         raise RuntimeError(msg)
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Sem conexão com a OpenRouter: {e.reason}")
+        raise RuntimeError(f"Sem conexão com {pv['nome']}: {e.reason}")
 
     tool_calls = {}
     st = {"content": "", "printed": False, "t_open": False, "t0": 0.0, "t_text": ""}
@@ -614,6 +736,7 @@ def call_api(messages, stream_out=True):
         for kind, piece in splitter.feed(txt):
             think_chunk(piece) if kind == "think" else text_chunk(piece)
 
+    ACTIVE["res"] = res
     with res:
         for raw in res:
             line = raw.decode("utf-8", "replace").strip()
@@ -645,6 +768,7 @@ def call_api(messages, stream_out=True):
                     slot["function"]["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
+    ACTIVE["res"] = None
     for kind, piece in splitter.flush():
         think_chunk(piece) if kind == "think" else text_chunk(piece)
     think_close()
@@ -721,7 +845,10 @@ HELP = f"""{bold('Comandos')}
   /auto                    liga/desliga execução sem confirmação (cuidado!)
 
 {bold('Configuração')}
-  /key [chave]             define a API key (ou usa $OPENROUTER_API_KEY)
+  /provider [nome]         lista/troca o provedor (openrouter, openai, google, kilo, llm7, groq, mistral,
+                           deepseek, ollama, custom); cada um guarda sua chave e seu modelo
+  /baseurl <url>           URL de um servidor compatível com OpenAI (usa o provedor custom)
+  /key [chave]             define a API key do provedor atual (ou usa a variável de ambiente dele)
   /model [id]              mostra/troca o modelo
   /temp <0-2>   /tokens <n>   /extra <instruções globais>
   /prompt                  system prompts customizados (list|save|use|chat|off|show|rm|file|mode|memory|vars)
@@ -959,9 +1086,28 @@ def handle_command(line):
         if not arg:
             import getpass
             arg = getpass.getpass("API key (oculta): ").strip()
-        S["config"]["apiKey"] = arg
+        set_key(arg)
         save_state()
-        print(green("Chave salva em " + STATE_FILE))
+        print(green(f"Chave de {prov()['nome']} salva em " + STATE_FILE))
+    elif cmd == "provider":
+        if arg:
+            name = arg.strip().lower()
+            if name not in PROVIDERS:
+                print(red("Provedor desconhecido. Opções: " + ", ".join(PROVIDERS)))
+            else:
+                set_provider(name)
+                save_state()
+        for k, v in PROVIDERS.items():
+            on = k == provider()
+            print((green("● ") if on else "  ") + f"{k:11} {v['nome']:16} chave {key_status(k):12} modelo {saved_model(k) or '(defina com /model)'}")
+        if provider() == "custom" and not cfg("baseUrl"):
+            print(amber("  Defina a URL com /baseurl <url>   ex.: http://localhost:1234/v1"))
+    elif cmd == "baseurl":
+        if arg:
+            S["config"]["baseUrl"] = arg.strip()
+            set_provider("custom") if provider() != "custom" else None
+            save_state()
+        print(f"URL base (provedor personalizado): {cfg('baseUrl') or '(não definida)'}")
     elif cmd == "model":
         if arg:
             S["config"]["model"] = arg
@@ -1010,7 +1156,8 @@ def handle_command(line):
         print(green("Instruções globais atualizadas." if arg else "Instruções globais removidas."))
     elif cmd == "config":
         c_ = dict(S["config"])
-        c_["apiKey"] = ("…" + c_["apiKey"][-4:]) if c_["apiKey"] else ("(via env)" if os.environ.get("OPENROUTER_API_KEY") else "(não definida)")
+        c_["apiKey"] = key_status()
+        c_["keys"] = {p: key_status(p) for p in PROVIDERS if key_status(p) not in ("(não definida)", "(opcional)")}
         for k, v in c_.items():
             print(f"  {k:12} {v}")
         print(dim(f"  estado em    {STATE_FILE}"))
@@ -1088,10 +1235,15 @@ def main():
     ap.add_argument("-p", "--prompt", help="envia uma mensagem, imprime a resposta e sai")
     ap.add_argument("-c", "--chat", help="conversa (número, id ou título) a usar")
     ap.add_argument("-m", "--model", help="modelo para esta sessão")
+    ap.add_argument("-P", "--provider", help="provedor: " + ", ".join(PROVIDERS))
     ap.add_argument("-y", "--yes", action="store_true", help="não pedir confirmação para executar ferramentas")
     args = ap.parse_args()
 
     load_state()
+    if args.provider:
+        if args.provider not in PROVIDERS:
+            sys.exit("Provedor desconhecido. Opções: " + ", ".join(PROVIDERS))
+        set_provider(args.provider)
     if args.model:
         S["config"]["model"] = args.model
     if args.yes:
@@ -1103,15 +1255,15 @@ def main():
 
     if args.prompt is not None:
         if not api_key():
-            sys.exit("Defina OPENROUTER_API_KEY ou use /key no modo interativo.")
+            sys.exit(f"Defina {(prov()['env'] or ['a chave'])[0]} ou use /key no modo interativo.")
         if not sys.stdin.isatty() and not AUTO:
             print(amber("(stdin não interativo: ferramentas que executam código serão negadas sem --yes)"), file=sys.stderr)
         sys.exit(0 if chat_turn(args.prompt) is not None else 1)
 
     print(f"{green('◆')} {bold('mini-quark')} {dim('CLI · /help para comandos')}")
-    print(dim(f"  modelo: {cfg('model')} · conversa: {active_chat()['title']}"))
+    print(dim(f"  provedor: {prov()['nome']} · modelo: {cfg('model')} · conversa: {active_chat()['title']}"))
     if not api_key():
-        print(amber("  Sem API key. Use /key ou exporte OPENROUTER_API_KEY."))
+        print(amber(f"  Sem API key de {prov()['nome']}. Use /key ou exporte {(prov()['env'] or ['a chave'])[0]}."))
     if cfg("auto"):
         print(amber("  ⚠ Execução automática de ferramentas está LIGADA (/auto para desligar)."))
 
